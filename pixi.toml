@@ -1,0 +1,21 @@
+# Development environment with a CUDA 12.8 toolchain from conda-forge, for GPU hosts
+# without a system CUDA install. `pixi run test`, `pixi run bench`.
+[workspace]
+name = "tandem-cuda"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+cuda-version = "12.8.*"
+cuda-nvcc = "12.8.*"
+cuda-cudart-dev = "12.8.*"
+libcurand-dev = "*"
+gxx = "13.*"
+gcc = "13.*"
+make = "*"
+python = ">=3.11"
+
+[tasks]
+build = "make build"
+test = "make test"
+bench = "make bench"

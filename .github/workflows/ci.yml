@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# GitHub runners have no GPU, so CI compiles the tests and the bench for sm_80 and checks
+# the vector header. Run `make test` and `make bench` on a GPU host by hand.
+jobs:
+  build:
+    name: nvcc build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: tandem-rng/tandem-c
+          path: tandem-c
+      - uses: Jimver/cuda-toolkit@v0.2.27
+        with:
+          cuda: "12.8.1"
+          method: network
+          sub-packages: '["nvcc", "cudart", "curand"]'
+          non-cuda-sub-packages: '["libcurand-dev"]'
+      - run: make build TANDEM_C=tandem-c
+  vectors:
+    name: vector header is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          git clone --depth 1 https://github.com/tandem-rng/spec ../tandem-spec
+          make vectors
+          git diff --exit-code tests/vectors.h
