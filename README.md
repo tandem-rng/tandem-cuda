@@ -12,9 +12,9 @@ pseudorandom number generator built to be fast on CPUs and GPUs alike. One heade
 
 - `tandem::fill_u32/u64/f32/f64(key, pos, K, device_ptr, n, stream)`: fill device memory
   from a key and stream position, as the C library's `tandem_fill_*` would, and return the
-  position after the fill. One thread per chunk walks its `K` blocks. Blocks are stored
-  lane-interleaved, so the eight threads of a group write one 128-byte line per step and
-  the fill runs at memory bandwidth.
+  position after the fill. One thread per chunk walks its `K` blocks. For `K >= 8` a block
+  of 32 groups stages eight steps in shared memory and writes 512 contiguous bytes per
+  warp. For smaller `K` each group stores its own 128-byte line per step.
 - `tandem::device_rng`: a per-thread generator for kernels that draw scalars. It holds the
   transport form and one cached chunk state, about 20 registers. `from_key`, `seed`,
   `next_bool/u32/u64/f32/f64`, `split`, `sub`, `skip_to`. Its draws equal the C library's
@@ -57,22 +57,29 @@ output alignments with the C library compiled into the test. `pixi.toml` provide
 ## Speed
 
 NVIDIA A100 40 GB (PCIe), CUDA 12.8, `make bench`: 2^28 elements into device memory,
-minimum of seven `cudaEvent` timings after three warm-up runs. GPU 1 idle before the run,
-host load 11 from other users' CPU jobs.
+minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
+the run, host load 62 from other users' CPU jobs. Two consecutive runs agreed within 1%.
 
 | | GiB/s written |
 |---|---|
-| `tandem::fill_u32` | 1090 |
-| `tandem::fill_u64` | 1098 |
-| `tandem::fill_f32` | 1084 |
-| `tandem::fill_f64` | 1097 |
-| cuRAND Philox4x32-10 `curandGenerate` | 1016 |
-| cuRAND Philox4x32-10 `curandGenerateUniform` | 986 |
-| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 456 |
+| `tandem::fill_u32`, tile kernel (default for K >= 8) | 1383 |
+| `tandem::fill_u64`, tile kernel | 1395 |
+| `tandem::fill_f32`, tile kernel | 1383 |
+| `tandem::fill_f64`, tile kernel | 1394 |
+| `tandem::fill_u32`, direct kernel (K < 8) | 1309 |
+| `tandem::fill_u64`, direct kernel | 1313 |
+| `tandem::fill_f32`, direct kernel | 1309 |
+| `tandem::fill_f64`, direct kernel | 1323 |
+| cuRAND Philox4x32-10 `curandGenerate` | 1332 |
+| cuRAND Philox4x32-10 `curandGenerateUniform` | 1307 |
+| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 781 |
+| TandemRNG.jl Float32 fill, same card (its README) | 1257 to 1294 |
 
-Every Tandem fill writes at about 85% of the A100's 1.3 TB/s. TandemRNG.jl's CUDA fills on
-the same card reach 1257 to 1294 GiB/s with a shared-memory tile; that layout is the next
-step for this header.
+The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
+as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.
+The direct kernel stores each block straight from registers, so the eight threads of a group
+cover one 128-byte line per step. Both kernels pick a 16-byte vector store at compile time
+when the output's blocks are 16-byte aligned.
 
 ## License
 

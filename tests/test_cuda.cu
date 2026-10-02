@@ -84,10 +84,10 @@ static std::vector<uint8_t> device_bools(const uint32_t key[4], uint64_t pos, ui
 
 template <class T>
 static std::vector<T> device_fill(const uint32_t key[4], uint64_t pos, uint32_t K, size_t n,
-                                  size_t byte_shift = 0) {
+                                  size_t byte_shift = 0, bool tile = true) {
     dev<T> d(n + 2);
     T *out = reinterpret_cast<T *>(reinterpret_cast<char *>(d.p) + byte_shift);
-    tandem::detail::fill<T>(key, pos, K, out, n, 0);
+    tandem::detail::fill<T>(key, pos, K, out, n, 0, tile);
     CUDA_CHECK(cudaDeviceSynchronize());
     std::vector<T> v(n);
     CUDA_CHECK(cudaMemcpy(v.data(), out, n * sizeof(T), cudaMemcpyDeviceToHost));
@@ -208,19 +208,22 @@ static void check_against_c(std::mt19937_64 &gen, const char *label) {
         for (auto &w : key) w = (uint32_t)gen();
         uint32_t K = 1u << (gen() % 8);
         uint64_t pos = gen() % (1u << 20);
-        size_t n = (size_t)(gen() % 5000);
+        size_t n = (size_t)(gen() % (trial < 30 ? 5000 : 300000));
         size_t shift = (gen() % 2) ? 0 : (gen() % 4) * sizeof(T) % 16;
 
         tandem_rng c = tandem_from_key(key, pos, K);
         std::vector<T> want(n);
         cfill(&c, want.data(), n);
-        std::vector<T> got = device_fill<T>(key, pos, K, n, shift);
-        if (want != got) {
-            size_t i = 0;
-            while (i < n && want[i] == got[i]) i++;
-            std::printf("FAIL %s fill vs C at trial %d (K=%u pos=%llu n=%zu) element %zu\n",
-                        label, trial, K, (unsigned long long)pos, n, i);
-            failures++;
+        for (bool tile : {true, false}) {
+            std::vector<T> got = device_fill<T>(key, pos, K, n, shift, tile);
+            if (want != got) {
+                size_t i = 0;
+                while (i < n && want[i] == got[i]) i++;
+                std::printf("FAIL %s %s fill vs C at trial %d (K=%u pos=%llu n=%zu) element %zu\n",
+                            label, tile ? "tile" : "direct", trial, K, (unsigned long long)pos,
+                            n, i);
+                failures++;
+            }
         }
         if (n > 512) continue;
         std::vector<T> draws = device_draws<T, draw>(key, pos, K, n);

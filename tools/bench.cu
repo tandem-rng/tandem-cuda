@@ -1,4 +1,5 @@
 // Throughput of the device fills into device memory, next to cuRAND Philox4x32-10.
+// Minimum of 21 cudaEvent timings per row after a half-second warm-up.
 // Build and run on a GPU host: make bench
 #include <cstdio>
 #include <cstdlib>
@@ -24,7 +25,7 @@ template <class F> static double best_gibs(size_t bytes, F body) {
     CUDA_CHECK(cudaEventCreate(&t1));
     for (int i = 0; i < 3; i++) body();
     float best = 1e30f;
-    for (int rep = 0; rep < 7; rep++) {
+    for (int rep = 0; rep < 21; rep++) {
         CUDA_CHECK(cudaEventRecord(t0));
         body();
         CUDA_CHECK(cudaEventRecord(t1));
@@ -46,14 +47,35 @@ int main() {
     auto f32 = static_cast<float *>(buf);
     auto f64 = static_cast<double *>(buf);
 
+    // Half a second of fills first, so the clocks have ramped before anything is timed.
+    {
+        cudaEvent_t t0, t1;
+        CUDA_CHECK(cudaEventCreate(&t0));
+        CUDA_CHECK(cudaEventCreate(&t1));
+        CUDA_CHECK(cudaEventRecord(t0));
+        for (float ms = 0; ms < 500;) {
+            tandem::fill_u32(key, 0, 32, u32, N);
+            CUDA_CHECK(cudaEventRecord(t1));
+            CUDA_CHECK(cudaEventSynchronize(t1));
+            CUDA_CHECK(cudaEventElapsedTime(&ms, t0, t1));
+        }
+    }
     std::printf("%-34s %10s\n", "", "GiB/s");
-    std::printf("%-34s %10.0f\n", "tandem fill_u32",
+    std::printf("%-34s %10.0f\n", "tandem fill_u32, direct kernel",
+                best_gibs(N * 4, [&] { tandem::detail::fill(key, 0, 32u, u32, N, 0, false); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_u64, direct kernel",
+                best_gibs(N * 8, [&] { tandem::detail::fill(key, 0, 32u, u64, N, 0, false); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_f32, direct kernel",
+                best_gibs(N * 4, [&] { tandem::detail::fill(key, 0, 32u, f32, N, 0, false); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_f64, direct kernel",
+                best_gibs(N * 8, [&] { tandem::detail::fill(key, 0, 32u, f64, N, 0, false); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_u32, tile kernel",
                 best_gibs(N * 4, [&] { tandem::fill_u32(key, 0, 32, u32, N); }));
-    std::printf("%-34s %10.0f\n", "tandem fill_u64",
+    std::printf("%-34s %10.0f\n", "tandem fill_u64, tile kernel",
                 best_gibs(N * 8, [&] { tandem::fill_u64(key, 0, 32, u64, N); }));
-    std::printf("%-34s %10.0f\n", "tandem fill_f32",
+    std::printf("%-34s %10.0f\n", "tandem fill_f32, tile kernel",
                 best_gibs(N * 4, [&] { tandem::fill_f32(key, 0, 32, f32, N); }));
-    std::printf("%-34s %10.0f\n", "tandem fill_f64",
+    std::printf("%-34s %10.0f\n", "tandem fill_f64, tile kernel",
                 best_gibs(N * 8, [&] { tandem::fill_f64(key, 0, 32, f64, N); }));
 
     curandGenerator_t g;
