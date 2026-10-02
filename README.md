@@ -4,21 +4,17 @@
 
 CUDA implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncryptographic
 pseudorandom number generator built to be fast on CPUs and GPUs alike. One header,
-`tandem.cuh`, C++17. It produces the same stream, bit for bit, as the Julia reference
-[TandemRNG.jl](https://github.com/tandem-rng/TandemRNG.jl), the C reference
-[tandem-c](https://github.com/tandem-rng/tandem-c), the Rust crate
-[tandem-rs](https://github.com/tandem-rng/tandem-rs) and the NumPy `BitGenerator`
-[tandem-numpy](https://github.com/tandem-rng/tandem-numpy).
+`tandem.cuh`, C++17. It produces the stream the specification defines, bit for bit.
 
 - `tandem::fill_u32/u64/f32/f64(key, pos, K, device_ptr, n, stream)`: fill device memory
-  from a key and stream position, as the C library's `tandem_fill_*` would, and return the
+  from a key and stream position, as the specification's fill defines, and return the
   position after the fill. One thread per chunk walks its `K` blocks. For `K >= 8` a block
   of 32 groups stages eight steps in shared memory and writes 512 contiguous bytes per
   warp. For smaller `K` each group stores its own 128-byte line per step.
 - `tandem::device_rng`: a per-thread generator for kernels that draw scalars. It holds the
   transport form and one cached chunk state, about 20 registers. `from_key`, `seed`,
-  `next_bool/u32/u64/f32/f64`, `split`, `sub`, `skip_to`. Its draws equal the C library's
-  `tandem_next_*` for the same key and position, mixed widths included.
+  `next_bool/u32/u64/f32/f64`, `split`, `sub`, `skip_to`. Its draws follow the specification's
+  scalar rule for the same key and position, mixed widths included.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device.
 
 ## Use
@@ -29,7 +25,7 @@ pseudorandom number generator built to be fast on CPUs and GPUs alike. One heade
 const uint32_t key[4] = {1, 2, 3, 4};
 double *x;
 cudaMalloc(&x, n * sizeof(double));
-uint64_t pos = tandem::fill_f64(key, 0, 32, x, n);   // same values as the C fill from position 0
+uint64_t pos = tandem::fill_f64(key, 0, 32, x, n);   // the spec's Float64 fill from position 0
 
 __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float *out) {
     const uint32_t key[4] = {k0, k1, k2, k3};
@@ -49,9 +45,9 @@ make test TANDEM_C=../tandem-c      # or: pixi install && pixi run test
 ```
 
 `tests/test_cuda.cu` checks every vector of the specification, compares device fills and
-device scalar draws with dumps written by TandemRNG.jl (`tests/data`, shared with
-tandem-c), and compares device fills at random keys, chunk lengths, positions, lengths and
-output alignments with the C library compiled into the test. `pixi.toml` provides a CUDA
+device scalar draws with reference stream dumps in `tests/data`, and compares device fills at random keys,
+chunk lengths, positions, lengths and output alignments with the reference C implementation
+compiled into the test (a checkout at `TANDEM_C`). `pixi.toml` provides a CUDA
 12.8 toolchain from conda-forge for hosts without a system install.
 
 ## Speed
@@ -73,7 +69,6 @@ the run, host load 62 from other users' CPU jobs. Two consecutive runs agreed wi
 | cuRAND Philox4x32-10 `curandGenerate` | 1332 |
 | cuRAND Philox4x32-10 `curandGenerateUniform` | 1307 |
 | cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 781 |
-| TandemRNG.jl Float32 fill, same card (its README) | 1257 to 1294 |
 
 The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
 as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.

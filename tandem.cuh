@@ -2,7 +2,7 @@
  * GPUs alike. Header only, C++17.
  *
  * Implements https://github.com/tandem-rng/spec and produces the same stream, bit for bit,
- * as the Julia and C references. Two entry points:
+ * the specification defines. Two entry points:
  *
  *   - tandem::fill_u32/u64/f32/f64: fill device memory from a key and stream position. One
  *     thread per chunk, blocks stored lane-interleaved so a warp writes whole 128-byte lines.
