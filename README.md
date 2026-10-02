@@ -54,7 +54,7 @@ compiled into the test (a checkout at `TANDEM_C`). `pixi.toml` provides a CUDA
 
 NVIDIA A100 40 GB (PCIe), CUDA 12.8, `make bench`: 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
-the run, host load 62 from other users' CPU jobs. Two consecutive runs agreed within 1%.
+the run. Two consecutive runs agreed within 1%.
 
 | | GiB/s written |
 |---|---|
