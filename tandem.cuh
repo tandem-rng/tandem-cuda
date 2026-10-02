@@ -1,8 +1,8 @@
 /* Tandem8x32 for CUDA: a noncryptographic pseudorandom number generator, fast on CPUs and
  * GPUs alike. Header only, C++17.
  *
- * Implements https://github.com/tandem-rng/spec and produces the same stream, bit for bit,
- * the specification defines. Two entry points:
+ * Implements https://github.com/tandem-rng/spec and produces the stream it defines, bit for
+ * bit. Two entry points:
  *
  *   - tandem::fill_u32/u64/f32/f64: fill device memory from a key and stream position. One
  *     thread per chunk, blocks stored lane-interleaved so a warp writes whole 128-byte lines.
