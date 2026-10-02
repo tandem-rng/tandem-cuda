@@ -12,7 +12,7 @@ permissions:
 # the vector header. Run `make test` and `make bench` on a GPU host by hand.
 jobs:
   build:
-    name: nvcc build
+    name: nvcc build (pixi toolchain)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,13 +20,10 @@ jobs:
         with:
           repository: tandem-rng/tandem-c
           path: tandem-c
-      - uses: Jimver/cuda-toolkit@v0.2.27
+      - uses: prefix-dev/setup-pixi@v0.9.3
         with:
-          cuda: "12.8.1"
-          method: network
-          sub-packages: '["nvcc", "cudart", "curand"]'
-          non-cuda-sub-packages: '["libcurand-dev"]'
-      - run: make build TANDEM_C=tandem-c
+          locked: false
+      - run: pixi run make build TANDEM_C=tandem-c
   vectors:
     name: vector header is current
     runs-on: ubuntu-latest
