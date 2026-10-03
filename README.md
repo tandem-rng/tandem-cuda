@@ -3,8 +3,15 @@
 # tandem-cuda
 
 CUDA implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncryptographic
-pseudorandom number generator built to be fast on CPUs and GPUs alike. One header,
-`tandem.cuh`, C++17. It produces the stream the specification defines, bit for bit.
+pseudorandom number generator built to be fast on CPUs and GPUs alike. Header only, C++17.
+It produces the stream the specification defines, bit for bit.
+
+- `tandem.cuh`: the CUDA fills and `device_rng`.
+- `include/tandem/core.hpp`: the portable core that `tandem.cuh` builds on. It holds the
+  step, the seeding function, the stream layout, the float mappings, child keys, an
+  eight-lane row and the scalar generator `tandem::Rng`, without CUDA types. Its functions
+  are `TANDEM_FN`: `KOKKOS_INLINE_FUNCTION` under Kokkos, `__host__ __device__ inline`
+  under nvcc and hipcc, `inline` otherwise.
 
 - `tandem::fill_u32/u64/f32/f64(key, pos, K, device_ptr, n, stream)`: fill device memory
   from a key and stream position, as the specification's fill defines, and return the
@@ -15,9 +22,12 @@ pseudorandom number generator built to be fast on CPUs and GPUs alike. One heade
   transport form and one cached chunk state, about 20 registers. `from_key`, `seed`,
   `next_bool/u32/u64/f32/f64`, `split`, `sub`, `skip_to`. Its draws follow the specification's
   scalar rule for the same key and position, mixed widths included.
-- `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device.
+- `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
+  from `core.hpp`.
 
 ## Use
+
+Put `include/` on the include path, for example `nvcc -I<tandem-cuda>/include`.
 
 ```cpp
 #include "tandem.cuh"
