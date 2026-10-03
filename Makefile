@@ -4,6 +4,7 @@ ARCH ?= -arch=sm_80
 NVCCFLAGS ?= -std=c++17 -O3 $(ARCH) -Xcompiler -Wall,-Wextra
 TANDEM_C ?= ../tandem-c
 SPEC_VECTORS ?= ../tandem-spec/vectors.json
+HEADERS := tandem.cuh include/tandem/core.hpp
 
 # nvcc needs a host compiler it knows; a conda toolchain names one through CXX.
 ifdef CXX
@@ -22,11 +23,11 @@ build: tests/test_cuda tools/bench
 tandem_c.o: $(TANDEM_C)/tandem.c $(TANDEM_C)/tandem.h
 	$(CC) -std=c99 -O2 -c -o $@ $<
 
-tests/test_cuda: tests/test_cuda.cu tests/vectors.h tandem.cuh tandem_c.o
-	$(NVCC) $(NVCCFLAGS) -I$(TANDEM_C) -o $@ tests/test_cuda.cu tandem_c.o $(LINK)
+tests/test_cuda: tests/test_cuda.cu tests/vectors.h $(HEADERS) tandem_c.o
+	$(NVCC) $(NVCCFLAGS) -Iinclude -I$(TANDEM_C) -o $@ tests/test_cuda.cu tandem_c.o $(LINK)
 
-tools/bench: tools/bench.cu tandem.cuh
-	$(NVCC) $(NVCCFLAGS) -o $@ tools/bench.cu -lcurand $(LINK)
+tools/bench: tools/bench.cu $(HEADERS)
+	$(NVCC) $(NVCCFLAGS) -Iinclude -o $@ tools/bench.cu -lcurand $(LINK)
 
 test: tests/test_cuda
 	./tests/test_cuda tests/data

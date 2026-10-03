@@ -1,5 +1,5 @@
 /* Tandem8x32 for CUDA: a noncryptographic pseudorandom number generator, fast on CPUs and
- * GPUs alike. Header only, C++17.
+ * GPUs alike. Header only, C++17, on the portable core include/tandem/core.hpp.
  *
  * Implements https://github.com/tandem-rng/spec and produces the stream it defines, bit for
  * bit. Two entry points:
@@ -18,120 +18,19 @@
 
 #include <cuda_runtime.h>
 
+#include "tandem/core.hpp"
+
 namespace tandem {
-
-constexpr uint32_t DEFAULT_K = 32;
-
-constexpr uint32_t CLOCK_WEYL = 0x9e3779b9u;
-constexpr uint32_t DOMAIN_STREAM = 0x9e3779b9u;
-constexpr uint32_t DOMAIN_SPLIT = 0xbb67ae85u;
-constexpr uint32_t DOMAIN_FORK = 0xd2511f53u;
-constexpr uint32_t DOMAIN_FOLD = 0xcd9e8d57u;
-constexpr uint32_t DOMAIN_SEED = 0xa54ff53au;
-constexpr uint32_t AUX_STREAM = 0x94d049bbu;
-
-__host__ __device__ constexpr uint32_t round_constant(int r) {
-    constexpr uint32_t rc[8] = {0xd17cc1b7u, 0xa7220a94u, 0xfe13abe8u, 0xfa9a6ee0u,
-                                0xedb14accu, 0x9e21c820u, 0xff28b1d5u, 0xef5de2b0u};
-    return rc[r];
-}
-
-__host__ __device__ inline uint32_t rotl(uint32_t x, unsigned r) {
-    return (x << r) | (x >> (32u - r));
-}
-
-__host__ __device__ inline uint32_t mulhi(uint32_t a, uint32_t b) {
-#ifdef __CUDA_ARCH__
-    return __umulhi(a, b);
-#else
-    return (uint32_t)(((uint64_t)a * b) >> 32);
-#endif
-}
-
-/* The step T: mix the exposed half, clock the hidden half, feed o0 back into h0. */
-__host__ __device__ inline void T(uint32_t o[4], uint32_t h[4]) {
-    uint32_t m0 = h[0] | 1u, m1 = h[1] | 1u;
-    uint32_t lo0 = o[0] * m0, hi0 = mulhi(o[0], m0);
-    uint32_t lo1 = o[2] * m1, hi1 = mulhi(o[2], m1);
-    uint32_t n0 = o[1] ^ hi1 ^ lo1;
-    uint32_t n1 = rotl(lo1, 16) ^ h[2];
-    uint32_t n2 = o[3] ^ hi0 ^ lo0;
-    uint32_t n3 = rotl(lo0, 16) ^ h[3];
-
-    h[0] ^= rotl(h[1], 7);
-    h[1] ^= rotl(h[2], 13);
-    h[2] ^= rotl(h[3], 22);
-    h[3] ^= rotl(h[0], 3);
-    h[0] = (h[0] + CLOCK_WEYL) ^ n0;
-
-    o[0] = n0;
-    o[1] = n1;
-    o[2] = n2;
-    o[3] = n3;
-}
-
-/* The seeding function F: eight rounds of T, a round constant, and a half swap. */
-__host__ __device__ inline void F(uint32_t o[4], uint32_t h[4]) {
-    for (int r = 0; r < 8; r++) {
-        T(o, h);
-        o[0] ^= round_constant(r);
-        for (int w = 0; w < 4; w++) {
-            uint32_t t = o[w];
-            o[w] = h[w];
-            h[w] = t;
-        }
-    }
-}
-
-__host__ __device__ inline void F_keyed(const uint32_t key[4], uint64_t counter,
-                                        uint32_t domain, uint32_t aux, uint32_t o[4],
-                                        uint32_t h[4]) {
-    o[0] = (uint32_t)counter;
-    o[1] = (uint32_t)(counter >> 32);
-    o[2] = domain;
-    o[3] = aux;
-    for (int w = 0; w < 4; w++) h[w] = key[w];
-    F(o, h);
-}
-
-/* Block B(c, j): the exposed half of chunk c after j + 1 steps. */
-__host__ __device__ inline void block(const uint32_t key[4], uint64_t c, uint32_t j,
-                                      uint32_t out[4]) {
-    uint32_t h[4];
-    F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, out, h);
-    for (uint32_t s = 0; s <= j; s++) T(out, h);
-}
-
-__host__ __device__ inline uint64_t align_pos(uint64_t pos, unsigned w) {
-    return (pos + w - 1u) & ~((uint64_t)w - 1u);
-}
-
-__host__ __device__ inline double to_f64(uint64_t raw) {
-    return (double)(raw >> 11) * 0x1p-53;
-}
-
-__host__ __device__ inline float to_f32(uint32_t raw) {
-    return (float)(raw >> 8) * 0x1p-24f;
-}
-
-__host__ __device__ inline unsigned log2k(uint32_t K) {
-    unsigned s = 0;
-    while ((K >> s) > 1u) s++;
-    return s;
-}
 
 /* ---- Per-thread generator ---------------------------------------------------------------- */
 
-/* Transport form plus one cached chunk: the state of chunk `chunk` after `step + 1` steps,
- * whose exposed half is block B(chunk, step). About 20 registers. */
+/* The transport form with public fields plus one cached chunk state. About 20 registers.
+ * tandem::Rng has the same law and state behind accessors. */
 struct device_rng {
     uint32_t key[4];
     uint64_t pos;
     uint32_t K;
-    uint32_t live;
-    uint64_t chunk;
-    uint32_t step;
-    uint32_t o[4], h[4];
+    ChunkCache cache;
 
     __host__ __device__ static device_rng from_key(const uint32_t key[4], uint64_t pos,
                                                    uint32_t K) {
@@ -139,54 +38,21 @@ struct device_rng {
         for (int w = 0; w < 4; w++) r.key[w] = key[w];
         r.pos = pos;
         r.K = K ? K : DEFAULT_K;
-        r.live = 0;
-        r.chunk = 0;
-        r.step = 0;
-        for (int w = 0; w < 4; w++) r.o[w] = r.h[w] = 0;
+        r.cache = ChunkCache{};
         return r;
     }
 
     __host__ __device__ static device_rng seed(uint64_t seed_lo, uint64_t seed_hi,
                                                uint32_t K) {
-        uint32_t o[4] = {0, 0, DOMAIN_SEED, 0};
-        uint32_t h[4] = {(uint32_t)seed_lo, (uint32_t)(seed_lo >> 32), (uint32_t)seed_hi,
-                         (uint32_t)(seed_hi >> 32)};
-        F(o, h);
-        return from_key(o, 0, K);
+        uint32_t k[4];
+        seed_key(seed_lo, seed_hi, k);
+        return from_key(k, 0, K);
     }
 
     __host__ __device__ void skip_to(uint64_t p) { pos = p; }
-
-    /* Bring the cache to the block that holds stream bit p. Stepping forward inside the
-     * cached chunk costs one T per block; any other move reseeds. */
-    __host__ __device__ void load(uint64_t p) {
-        uint64_t row = p >> 10;
-        unsigned shift = log2k(K);
-        uint32_t j = (uint32_t)(row & (K - 1u));
-        uint64_t c = 8u * (row >> shift) + ((p >> 7) & 7u);
-        if (!live || c != chunk || j < step) {
-            F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
-            T(o, h);
-            chunk = c;
-            step = 0;
-            live = 1;
-        }
-        for (; step < j; step++) T(o, h);
-    }
-
-    /* w bits (a power of two, 1 to 64) at the aligned position p. */
-    __host__ __device__ uint64_t read(uint64_t p, unsigned w) {
-        load(p);
-        uint32_t lo = o[(p >> 5) & 3u];
-        if (w == 64u) return lo | ((uint64_t)o[((p >> 5) & 3u) + 1u] << 32);
-        return (lo >> (p & 31u)) & (0xffffffffu >> (32u - w));
-    }
-
-    __host__ __device__ uint64_t next(unsigned w) {
-        uint64_t p = align_pos(pos, w);
-        pos = p + w;
-        return read(p, w);
-    }
+    __host__ __device__ void load(uint64_t p) { cache.load(key, K, p); }
+    __host__ __device__ uint64_t read(uint64_t p, unsigned w) { return cache.read(key, K, p, w); }
+    __host__ __device__ uint64_t next(unsigned w) { return cache.next(key, K, pos, w); }
 
     __host__ __device__ bool next_bool() { return next(1) != 0; }
     __host__ __device__ uint32_t next_u32() { return (uint32_t)next(32); }
@@ -196,9 +62,9 @@ struct device_rng {
 
     __host__ __device__ device_rng child(uint64_t counter, uint32_t domain, uint32_t aux,
                                          bool hidden) const {
-        uint32_t co[4], ch[4];
-        F_keyed(key, counter, domain, aux, co, ch);
-        return from_key(hidden ? ch : co, 0, K);
+        uint32_t k[4];
+        child_key(key, counter, domain, aux, hidden, k);
+        return from_key(k, 0, K);
     }
 
     /* Child by index, from the key alone. */
