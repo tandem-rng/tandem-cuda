@@ -4,52 +4,76 @@ These fills are not part of the specification. Other ports should follow the sam
 and the C library's `tandem_fill_u32_below` and `tandem_fill_u64_below` give the same values bit
 for bit, rejected draws included.
 
-**Normals.** One Box-Muller step turns two uniforms `a`, `b` into two normals,
-`r = sqrt(-2 ln(1 - a))`, `z0 = r cos(2 pi b)`, `z1 = r sin(2 pi b)`. `Rng::normal2()` returns
-the pair `(z0, z1)`, `Rng::normal()` its first half, and both consume two Float64 uniforms. A
-fill of `n` normals is the flattened sequence of `normal2` calls: pair `j`, the elements `2j` and
-`2j + 1`, comes from the Float64 draws `2j` and `2j + 1` of the Float64 fill that starts at the
-same position. The fill starts at `pos` aligned up to 64 bits and consumes `2 ceil(n / 2)`
-draws, so an odd `n` uses the cos half of its last pair and still advances past both draws. An empty
-normal or bounded fill consumes nothing and returns `pos` unchanged, even when `pos` is unaligned. A
-start at an odd Float64 draw makes every pair span two blocks, and the kernel steps a second
-chunk per thread to read them, at about 80% of the speed. Devices and hosts run the same
-polynomial step below, so f64 normals agree bit for bit on every platform, and with tandem-c.
+**Float64 normals.** `fill_normal_f64` is the 1024-layer ziggurat of Appendix A of the
+specification. Element `e` comes from UInt64 draw `e` of the fill that starts at `pos` aligned up
+to 64 bits: bits 0-9 pick the layer `i`, bit 10 the sign, bits 11-63 the magnitude `ra`, and
+`x = +-ra W[i]` is the normal when `ra < K[i]`, 99.57 % of the time. A miss continues on the draws
+of `split(g)` of `sub(0x4e524d3634)` of the generator with the fill's key at position 0, where `g`
+is the global draw index `align(pos, 64) / 64 + e`, through the wedge test `ln y < -x^2 / 2` and
+Marsaglia's tail. Each element starts its own fallback, so a fill consumes `n` draws, a fill cut
+at any element equals the whole fill, and `Rng::normal()` is element 0 of a fill.
+`Rng::normal2()` is two such draws. An empty fill returns `pos` aligned up to 64 bits, as an empty
+uniform fill does.
 
-`box_muller2` in `core.hpp`, on a device and on a host, and `box_muller2_f32` on a host do not
-call libm. They are the polynomial form of tandem-c: the logarithm from the exponent bits and a short series, and the
-sine and cosine from an exact quarter-turn reduction and polynomials, at most 9.9e-16 relative in
-f64 and 3.3 ulps in f32 against libm. Every multiply-add is an explicit `std::fma` and contraction
-is off, as in tandem-c, so every host compiler and target gives the C library's bits, and a scalar
-`normal2()` equals a pair of a fill. The f64 step `tandem::normal_pair_f64` is inlined into the
-device kernels too: no plain product feeds a plain sum except an exact one, so device contraction
-cannot change the bits. It took the A100 f64 fill from 706 GiB/s with `log` and `sincospi` to 833. `tandem::normal_block_f64` and `normal_block_f32` turn arrays
-of uniforms into normals for host fills, and clang vectorizes them on Arm and on x86 without
-`-ffast-math` (`make hostvec` checks it). x86 needs `-mfma` (the Makefile passes `-mavx2 -mfma`),
-because without it `std::fma` is a slow library call that gives the same bits.
+The tables `W`, `K` and `Y` come from the specification's `tables/normal_f64_zig1024.json`
+through `tools/gen_normal_tables.py`, which checks the file's SHA-256, into
+`include/tandem/normal_tables.hpp` (`make tables`). CI regenerates the header from the spec
+repository and fails on any difference. `W[i]` and `K[i]` sit side by side, so the fast path reads
+one 16-byte entry: two separate tables cost the A100 the L1 throughput of a second gather. Device
+code reads its own copy in global memory through the read-only cache. `ln` is the reference
+logarithm `-L(x) / 2`, the polynomial of the exponentials, every multiply-add an explicit
+`std::fma`. Every other operation of the slow path rounds once: the wedge's product is an fma with
+a zero addend and its sum `__dadd_rn` on a device, so no compiler fuses them. Host and device
+therefore return tandem-c's values bit for bit, also under `-ffp-contract=fast`.
 
-**Float normals.** `fill_normal_f32` and `Rng::normalf2()` are the same on Float32 draws, in
-float: `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf` and `sqrtf`. The device fill takes the
+The fill runs two kernels. The table pass is the direct fill kernel with the fast path: one
+thread per chunk, each block's two elements stored as one 16-byte vector. A miss goes to a queue
+in shared memory, and the block appends its queue to a list in global memory with one atomic add.
+The second kernel continues each listed miss, one thread per miss. The table pass makes no call,
+which keeps its registers and its loop free of the slow path's setup. The list has room for
+`n / 128` misses, twice the expected count, from `cudaMallocAsync` on the fill's stream, `n / 8`
+bytes. If it overflows, the second kernel walks the whole fill again and continues every miss.
+Fills below 2^16 elements, or without the stream-ordered allocator, run one kernel that continues
+each miss in place and allocate nothing.
+
+When the output and the stream differ by 8 bytes modulo 16, as for a start at an odd draw into an
+aligned buffer, an element pair of one block straddles two 16-byte slots. A warp shuffle then
+brings each thread the low element of the next lane, and the thread stores its high element with
+it. Lane 7's partner is lane 0's next block, and the last lane of a group pairs with the next
+group's first element, through the warp or, across warps, shared memory. Every group's 128 bytes
+then cover whole 32-byte sectors. A row 8 bytes off the sectors halved the speed, even with
+16-byte stores, and one lone element at each group's ends, a sector half written by one warp and
+finished by another much later, cost 15 %. Both kernels store each block one step late, so that
+the store does not wait for the step's table reads.
+
+**Float normals.** `fill_normal_f32` is Box-Muller on Float32 draws, in float: pair `j`, the
+elements `2j` (cos half) and `2j + 1` (sin half), comes from the draws `2j` and `2j + 1`, as the
+flattened `Rng::normalf2()` calls, with `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf` and
+`sqrtf`. An odd `n` uses the cos half of its last pair and still advances past both draws, and an
+empty fill returns `pos` unchanged. The device fill takes the
 angle through the fast `__sincosf` on `2 pi (v - 0.5)`, which is accurate on `[-pi, pi]`, because
 the precise `sincospif` made the fill compute bound at 1065 GiB/s against 1300 memory bound. The
-result stays within 16 ulps + 1e-6 of the precise step: at most 1.5e-6 absolute over the random
-fills and 7.2e-7 on the fixtures, up to 47 ulps for a value near 0.01, where the absolute error
-dominates. `__logf` is not used, because its absolute error near 1 distorts small radii by
+result differs from the precise step by at most 1.55e-6 absolute over the random fills and 7.2e-7
+on the fixtures, up to 47 ulps for a value near 0.01, where the absolute error dominates. That
+exceeds the 16 ulps + 1e-6 of the specification's tolerance for a few values: one element of 75211
+reached 1.37e-6 at a value near 0.03. `__logf` is not used, because its absolute error near 1 distorts small radii by
 thousands of ulps. Define `TANDEM_PRECISE_F32_NORMAL` for `sincospif` and 4 ulps. The fill starts at `pos` aligned up to 32 bits and consumes `64 ceil(n / 2)` bits, so
-a block holds two pairs and a start at an odd Float32 draw makes some span two blocks. It does
-not round the f64 normal. Float normals agree across ports and devices to a few ulps, not bit for
+a block holds two pairs and a start at an odd Float32 draw makes some span two blocks. Float normals agree across ports and devices to a few ulps, not bit for
 bit, because libm float functions differ. The host version of the f32 step takes its angle in
 double and rounds the results, because a float angle `2 pi b` is off by up to `2 pi b 2^-24`
 where `sincospif` is not. The uniforms are exact, and everything else in this library is bit for
-bit. `tests/cross_fill_normal.h` holds normal fixtures for ports at even and odd starts, from the
-host polynomial code: host builds match them exactly, devices to the tolerances above.
+bit. `tests/cross_fill_normal.h` holds normal fixtures for ports, from the host code: f64 ziggurat
+fills at the six starts of tandem-c's `tests/cross_normal.h`, with misses of every kind, exact
+everywhere, and f32 fills at even and odd starts, exact on hosts and to the tolerances above on
+devices.
 
 **Exponentials.** `fill_exponential_f64` writes element `i` as `-ln(1 - u)` of Float64 draw `i` of
 the fill that starts at `pos` aligned up to 64 bits, and `fill_exponential_f32` the same in float
 on Float32 draws aligned up to 32 bits, as Appendix A of the specification defines them. A fill
 consumes `n` draws, equals the `Rng::exponential()` (`exponentialf()`) calls, and an empty fill
 returns `pos` unchanged. `tandem::exponential_f64` and `exponential_f32` in `core.hpp` compute the
-logarithm of the f64 and f32 Box-Muller steps on hosts and devices: no libm call, every multiply-add
+reference logarithm and the logarithm of the f32 Box-Muller step on hosts and devices: no libm
+call, every multiply-add
 an explicit `std::fma`, and no plain product feeding a plain sum. Device contraction therefore
 cannot change the bits, and every host and device returns tandem-c's values, which the tests check
 byte for byte. Building device code with `-use_fast_math` or `-prec-div=false` changes the

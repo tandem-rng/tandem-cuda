@@ -3,9 +3,10 @@
 - `tandem.cuh`: the CUDA fills and `device_rng`.
 - `include/tandem/core.hpp`: the portable core that `tandem.cuh` builds on. It holds the
   step, the seeding function, the stream layout, the float mappings, child keys, an
-  eight-lane row and the scalar generator `tandem::Rng`, without CUDA types. Its functions
-  are `TANDEM_FN`: `KOKKOS_INLINE_FUNCTION` under Kokkos, `__host__ __device__ inline`
-  under nvcc and hipcc, `inline` otherwise.
+  eight-lane row, the scalar generator `tandem::Rng` and the normal ziggurat, without CUDA
+  types. `include/tandem/normal_tables.hpp` holds the ziggurat's tables, generated from the
+  specification. Its functions are `TANDEM_FN`: `KOKKOS_INLINE_FUNCTION` under Kokkos,
+  `__host__ __device__ inline` under nvcc and hipcc, `inline` otherwise.
 
 - `tandem::fill_u32/u64/f32/f64(key, pos, K, device_ptr, n, stream)`: fill device memory
   from a key and stream position, as the specification's fill defines, and return the
@@ -26,9 +27,11 @@
   widens the 32-bit draw into an 8-byte element. The draws and the consumed bits are those of the
   plain fill, and the offset and the widening are fused into the store, so there is no second
   pass. `fill_u64_below` takes a `uint64_t` or `int64_t` low bound and output.
-- `tandem::fill_normal_f64/f32(key, pos, K, out, n, stream)`: `n` standard normals, both
-  Box-Muller halves per two uniforms, as the flattened `Rng::normal2()` or `normalf2()`
-  calls. Not part of the specification.
+- `tandem::fill_normal_f64(key, pos, K, out, n, stream)`: `n` standard normals by the 1024-layer
+  ziggurat, one UInt64 draw each, as `Rng::normal()` calls, bit identical to tandem-c. From
+  2^16 elements it takes `n / 8` bytes of scratch from `cudaMallocAsync` on `stream` for its list
+  of misses. `fill_normal_f32`: both Box-Muller halves per two Float32 uniforms, as the flattened
+  `Rng::normalf2()` calls. Appendix A of the specification.
 - `tandem::fill_exponential_f64/f32(key, pos, K, out, n, stream)`: `n` standard exponentials
   `-ln(1 - u)`, one uniform each, as `Rng::exponential()` or `exponentialf()` calls, bit
   identical to tandem-c. Not part of the specification.
@@ -41,10 +44,10 @@
   registers. `from_key`, `seed`, `skip_to`, `next_bool/u8/u16/u32/u64/f16_bits/f32/f64`. Its
   draws follow the specification's scalar rule for the same key and position, mixed widths
   included. The rest of the draw API is `tandem::Rng`'s, shared through `Draws<D>` in
-  `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`/`normal2()`
-  and `normalf()`/`normalf2()` by Box-Muller (the `f` forms in float from two f32 uniforms),
-  `exponential()` and `exponentialf()`, `at_urand/urand64/frand/drand(i)`, `child`, `split`,
-  `sub` and `fork`. Bounded draws, normals and exponentials are not part of the specification.
+  `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`
+  (one ziggurat draw) and `normal2()` (two), `normalf()`/`normalf2()` by Box-Muller in float
+  from two f32 uniforms, `exponential()` and `exponentialf()`, `at_urand/urand64/frand/drand(i)`,
+  `child`, `split`, `sub` and `fork`. Bounded draws, normals and exponentials are not part of the specification.
   They match `tandem_u32_below`, `tandem_u64_below`, `tandem_normal_f64` and
   `tandem_exponential_f64` and `_f32` of the C library.
 - `tandem_thrust.cuh`: Thrust and CUB adapters. `tandem::uniform<T>` (u32, u64, f32, f64),
@@ -52,8 +55,12 @@
   to element `i` of the fill of the same type, built on the device generator's random access.
   `tandem::make_iterator(f, first)` wraps one in a `transform_iterator` over a
   `counting_iterator`, for `thrust::reduce`, `thrust::copy_n`, `thrust::transform` and CUB. A
-  normal iterator yields the cos half at `2j` and the sin half at `2j + 1` of the uniforms `2j`
-  and `2j + 1`. Header only, and Thrust ships with the toolkit.
+  `normal<double>` yields the ziggurat of UInt64 draw `i`, and `normal<float>` the cos half at
+  `2j` and the sin half at `2j + 1` of the uniforms `2j` and `2j + 1`. Header only, and Thrust
+  ships with the toolkit.
+- `tandem::normal_f64(r, key, K, g)`: the ziggurat normal of one UInt64 draw `r` with global draw
+  index `g` under a generator's key and `K`, element `g - align(pos, 64) / 64` of a fill.
+  `normal_f64_fast(r, hit)` is its table step alone.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
   from `core.hpp`.
 
