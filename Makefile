@@ -22,7 +22,7 @@ CXX_HOST = $(HOSTCXX)
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test bench host vectors cross clean
+.PHONY: build test bench clangcuda host vectors cross clean
 
 build: tests/test_cuda tools/bench
 
@@ -40,6 +40,19 @@ test: tests/test_cuda
 
 bench: tools/bench
 	./tools/bench
+
+# clang's own CUDA frontend, as Kokkos and others build. CUDA_PATH is the toolkit prefix, the
+# conda environment's by default. Only the tests are built, with the same sources as nvcc.
+CUDA_PATH ?= $(CONDA_PREFIX)
+CLANGCUDA_STD ?= c++20
+tests/test_clangcuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(HEADERS) tandem_c.o
+	$(HOSTCXX) --cuda-path=$(CUDA_PATH) -Wno-unknown-cuda-version -isystem $(CUDA_PATH)/targets/x86_64-linux/include \
+	  --cuda-gpu-arch=sm_80 -std=$(CLANGCUDA_STD) -O3 -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ \
+	  -x cuda tests/test_cuda.cu -x none tandem_c.o -L$(CUDA_PATH)/lib -L$(CUDA_PATH)/targets/x86_64-linux/lib \
+	  -lcudart -Wl,-rpath,$(CUDA_PATH)/lib -Wl,-rpath,$(CUDA_PATH)/targets/x86_64-linux/lib
+
+clangcuda: tests/test_clangcuda
+	./tests/test_clangcuda tests/data
 
 # core.hpp must stay valid C++17 for its other consumers, so this build pins the standard.
 tests/host_core: tests/host_core.cpp include/tandem/core.hpp tandem_c.o
@@ -60,4 +73,4 @@ cross:
 	./tools/gen_cross_fill_normal > tests/cross_fill_normal.h
 
 clean:
-	rm -f tandem_c.o tests/test_cuda tests/host_core tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal
+	rm -f tandem_c.o tests/test_clangcuda tests/test_cuda tests/host_core tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal

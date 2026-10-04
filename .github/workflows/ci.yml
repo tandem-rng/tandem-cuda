@@ -36,6 +36,20 @@ jobs:
           locked: false
           environments: ${{ matrix.env }}
       - run: pixi run -e ${{ matrix.env }} make build TANDEM_C=tandem-c ${{ matrix.host }}
+  clang-cuda:
+    name: clang CUDA frontend (clang 19, CUDA 12.8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: tandem-rng/tandem-c
+          path: tandem-c
+      - uses: prefix-dev/setup-pixi@v0.9.3
+        with:
+          locked: false
+          environments: cuda12
+      - run: pixi run -e cuda12 make tests/test_clangcuda TANDEM_C=tandem-c
   core-cxx17:
     name: core.hpp as C++17 (${{ matrix.cc }})
     runs-on: ubuntu-latest
