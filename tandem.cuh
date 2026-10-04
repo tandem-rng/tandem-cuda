@@ -350,9 +350,9 @@ template <class O>
 inline uint64_t fill_normal(const uint32_t key[4], uint64_t pos, uint32_t K, O *out, size_t n,
                             cudaStream_t stream) {
     K = K ? K : DEFAULT_K;
+    if (n == 0) return pos; /* consumes no draws, so no alignment either */
     uint64_t pairs = ((uint64_t)n + 1u) / 2u;
     uint64_t p0 = align_pos(pos, 64), p1 = p0 + pairs * 128u;
-    if (n == 0) return p1;
     bool odd = (p0 >> 6) & 1u;
     uint64_t ba = (p0 >> 7) + (odd ? 1u : 0u), bb = ba + pairs - 1u;
     uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K;
@@ -444,9 +444,9 @@ __global__ void __launch_bounds__(THREADS)
 inline uint64_t fill_normal_f32_impl(const uint32_t key[4], uint64_t pos, uint32_t K,
                                      float *out, size_t n, cudaStream_t stream) {
     K = K ? K : DEFAULT_K;
+    if (n == 0) return pos;
     uint64_t np = ((uint64_t)n + 1u) / 2u;
     uint64_t p0 = align_pos(pos, 32), p1 = p0 + np * 64u;
-    if (n == 0) return p1;
     uint64_t s0 = p0 >> 5, ba = s0 >> 2, bb = (s0 + 2u * np - 1u) >> 2;
     uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K;
     unsigned blocks = (unsigned)((8u * (g1 - g0 + 1u) + THREADS - 1) / THREADS);
@@ -568,10 +568,12 @@ inline uint64_t fill_i64(const uint32_t key[4], uint64_t pos, uint32_t K, int64_
  * see PURPOSE_BELOW32 in core.hpp. Not part of the specification. */
 inline uint64_t fill_u32_below(const uint32_t key[4], uint64_t pos, uint32_t K, uint32_t range,
                                uint32_t *out, size_t n, cudaStream_t stream = 0) {
+    if (n == 0) return pos;
     return detail::fill<detail::below32>(key, pos, K, out, n, stream, true, range);
 }
 inline uint64_t fill_u64_below(const uint32_t key[4], uint64_t pos, uint32_t K, uint64_t range,
                                uint64_t *out, size_t n, cudaStream_t stream = 0) {
+    if (n == 0) return pos;
     return detail::fill<detail::below64>(key, pos, K, out, n, stream, true, range);
 }
 

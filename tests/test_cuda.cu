@@ -713,6 +713,25 @@ static void test_generator() {
     CHECK(words_equal(s.key, tandem::device_rng::seed(42, 0, 32).key));
 }
 
+// An empty normal or bounded fill consumes no draws, so it leaves an unaligned position alone.
+static void test_empty_fills() {
+    const uint32_t key[4] = {1, 2, 3, 4};
+    dev<float> f(4);
+    dev<double> d(4);
+    dev<uint32_t> u(4);
+    dev<uint64_t> w(4);
+    for (uint64_t pos : {0ull, 1ull, 33ull, 64ull, 65ull, 1001ull}) {
+        CHECK(tandem::fill_normal_f64(key, pos, 32, d.p, 0) == pos);
+        CHECK(tandem::fill_normal_f32(key, pos, 32, f.p, 0) == pos);
+        CHECK(tandem::fill_u32_below(key, pos, 32, 6, u.p, 0) == pos);
+        CHECK(tandem::fill_u64_below(key, pos, 32, 6, w.p, 0) == pos);
+    }
+    tandem::generator g = tandem::generator::from_key(key, 65, 32);
+    g.fill_normal_f64(d.p, 0);
+    g.fill_u32_below(6, u.p, 0);
+    CHECK(g.pos == 65);
+}
+
 // A signed fill is the unsigned fill of the same width read in two's complement, and it returns
 // the same position.
 template <class S, class U, uint64_t (*sfill)(const uint32_t *, uint64_t, uint32_t, S *, size_t, cudaStream_t),
@@ -758,6 +777,7 @@ int main(int argc, char **argv) {
     test_normal();
     test_cross_normal();
     test_generator();
+    test_empty_fills();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

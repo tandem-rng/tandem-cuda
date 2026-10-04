@@ -57,7 +57,8 @@ the pair `(z0, z1)`, `Rng::normal()` its first half, and both consume two Float6
 fill of `n` normals is the flattened sequence of `normal2` calls: pair `j`, the elements `2j` and
 `2j + 1`, comes from the Float64 draws `2j` and `2j + 1` of the Float64 fill that starts at the
 same position. The fill starts at `pos` aligned up to 64 bits and consumes `2 ceil(n / 2)`
-draws, so an odd `n` uses the cos half of its last pair and still advances past both draws. A
+draws, so an odd `n` uses the cos half of its last pair and still advances past both draws. An empty
+normal or bounded fill consumes nothing and returns `pos` unchanged, even when `pos` is unaligned. A
 start at an odd Float64 draw makes every pair span two blocks, and the kernel steps a second
 chunk per thread to read them, at about 80% of the speed. On a device the angle goes through
 `sincospi(2b)`, on a host through `cos` and `sin`, and `log` differs in the last bits, so f64
