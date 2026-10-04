@@ -1,5 +1,6 @@
 tests/test_cuda
 tools/bench
+tools/normal_stats
 *.o
 .pixi/
 pixi.lock

@@ -26,7 +26,7 @@ FMAFLAGS := $(if $(filter x86_64 amd64,$(shell uname -m)),-mavx2 -mfma,)
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test thrust hostvec bench clangcuda host vectors tables cross clean
+.PHONY: build test thrust hostvec bench stats clangcuda host vectors tables cross clean
 
 build: tests/test_cuda tests/test_thrust tools/bench
 
@@ -52,6 +52,12 @@ test: tests/test_cuda tests/test_thrust
 bench: tools/bench
 	./tools/bench
 
+tools/normal_stats: tools/normal_stats.cu $(HEADERS)
+	$(NVCC) $(NVCCFLAGS) -Iinclude -o $@ tools/normal_stats.cu $(LINK)
+
+stats: tools/normal_stats
+	./tools/normal_stats
+
 # clang's own CUDA frontend, as Kokkos and others build. CUDA_PATH is the toolkit prefix, the
 # conda environment's by default. Only the tests are built, with the same sources as nvcc.
 CUDA_PATH ?= $(CONDA_PREFIX)
@@ -67,16 +73,16 @@ clangcuda: tests/test_clangcuda
 
 # core.hpp must stay valid C++17 for its other consumers, so this build pins the standard. The
 # test checks that the normals hash to tandem-c's tests/test_normal_bits.c value.
-tests/host_core: tests/host_core.cpp include/tandem/core.hpp tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h tandem_c.o
+tests/host_core: tests/host_core.cpp $(HEADERS) tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h tandem_c.o
 	$(CXX_HOST) -std=c++17 -O2 $(FMAFLAGS) -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ tests/host_core.cpp tandem_c.o
 
 host: tests/host_core
 	./tests/host_core
 
-# The host Box-Muller blocks must vectorize under clang, which is what makes them fast.
+# The host Float32 Box-Muller block must vectorize under clang, which is what makes it fast.
 hostvec:
 	$(CXX_HOST) -std=c++17 -O2 $(FMAFLAGS) -Iinclude -I$(TANDEM_C) -Rpass=loop-vectorize -c -o /dev/null tests/host_core.cpp 2>&1 \
-	  | grep "core.hpp" | grep -c "vectorized loop" | awk '{ if ($$1 < 2) { print "normal blocks not vectorized"; exit 1 } else print "normal blocks vectorized" }'
+	  | grep "core.hpp" | grep -c "vectorized loop" | awk '{ if ($$1 < 1) { print "normal block not vectorized"; exit 1 } else print "normal block vectorized" }'
 
 # Regenerate the vector header and the ziggurat tables from a checkout of
 # https://github.com/tandem-rng/spec.
@@ -96,4 +102,4 @@ cross:
 	./tools/gen_cross_fill_exponential > tests/cross_fill_exponential.h
 
 clean:
-	rm -f tandem_c.o tests/test_clangcuda tests/test_thrust tests/test_cuda tests/host_core tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal tools/gen_cross_fill_exponential
+	rm -f tandem_c.o tests/test_clangcuda tests/test_thrust tests/test_cuda tests/host_core tools/bench tools/normal_stats tools/gen_cross_fill_below tools/gen_cross_fill_normal tools/gen_cross_fill_exponential

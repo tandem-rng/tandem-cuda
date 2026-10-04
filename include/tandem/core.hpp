@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "normal_tables.hpp"
+
 #if defined(KOKKOS_VERSION)
 #define TANDEM_FN KOKKOS_INLINE_FUNCTION
 #elif defined(__CUDACC__) || defined(__HIPCC__)
@@ -323,9 +325,10 @@ template <class T> struct Pair2 {
     T z0, z1;
 };
 
-/* Host Box-Muller without libm in the loop, so that a compiler vectorizes a block of pairs. A
- * pair (a, b) gives r = sqrt(-2 ln(1 - a)) and the normals r cos(2 pi b) and r sin(2 pi b), cos
- * first. It is the same arithmetic as tandem-c's, so host builds agree bit for bit.
+/* Host Float32 Box-Muller without libm in the loop, so that a compiler vectorizes a block of
+ * pairs. A pair (a, b) gives r = sqrt(-2 ln(1 - a)) and the normals r cos(2 pi b) and
+ * r sin(2 pi b), cos first. It is the same arithmetic as tandem-c's, so host builds agree bit for
+ * bit.
  *
  * ln(1 - a): 1 - a is exact and in (0, 1]. Split it as m 2^e with m in [sqrt(1/2), sqrt(2)) by
  * its exponent bits, then ln m = 2 s (1 + z/3 + z^2/5 + ...) with s = (m - 1) / (m + 1) and
@@ -334,13 +337,12 @@ template <class T> struct Pair2 {
  *
  * cos and sin of 2 pi b: b - q/4 for the nearest quarter turn q is exact, so the angle in
  * [-pi/4, pi/4] needs no range reduction. Polynomials give cos and sin there, and the quarter
- * turn is a swap and a sign change. The maximum error is 9.9e-16 relative in f64 and 3.3 ulps in
- * f32 against libm.
+ * turn is a swap and a sign change. The maximum error is 3.3 ulps against libm.
  *
- * Contraction is off in the loops and every multiply-add is an explicit fused one, so every
+ * Contraction is off in the loop and every multiply-add is an explicit fused one, so every
  * compiler and target, the vector body and the scalar remainder do the same arithmetic. One
- * out-of-line body per precision keeps the scalar draws and the fills bit identical. */
-/* Device passes skip it: nvcc does not know it, and the f64 step cannot contract anyway. */
+ * out-of-line body keeps the scalar draws and the fills bit identical. */
+/* Device passes skip it: nvcc does not know it, and the block is host only. */
 #if defined(__clang__) && !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 #define TANDEM_FP_NOCONTRACT _Pragma("clang fp contract(off)")
 #else
@@ -354,26 +356,12 @@ template <class T> struct Pair2 {
 #define TANDEM_NOINLINE_NOFMA
 #endif
 
-/* The f64 Box-Muller step is inlined into the host loop, which must vectorize, and into device
- * kernels. GCC inlines it despite the loop's own optimize attribute only when forced. */
-#if defined(KOKKOS_VERSION)
-#define TANDEM_FORCE_INLINE KOKKOS_FORCEINLINE_FUNCTION
-#elif defined(__CUDACC__) || defined(__HIPCC__)
-#define TANDEM_FORCE_INLINE __host__ __device__ __forceinline__
-#elif defined(__GNUC__) || defined(__clang__)
-#define TANDEM_FORCE_INLINE __attribute__((always_inline)) inline
-#else
-#define TANDEM_FORCE_INLINE inline
-#endif
-
 namespace detail {
 /* IEEE sqrt that never sets errno, so that a loop around it vectorizes without -fno-math-errno
  * (glibc's sqrt is otherwise a library call). The argument here is never negative. */
 #if defined(__clang__) && !defined(__CUDACC__) && __has_builtin(__builtin_elementwise_sqrt)
-inline double sqrt_(double x) { return __builtin_elementwise_sqrt(x); }
 inline float sqrt_(float x) { return __builtin_elementwise_sqrt(x); }
 #else
-TANDEM_FN double sqrt_(double x) { return std::sqrt(x); }
 TANDEM_FN float sqrt_(float x) { return std::sqrt(x); }
 #endif
 /* Every multiply-add of the normal loops is an explicit fused multiply-add, so that every
@@ -420,60 +408,6 @@ TANDEM_FN float f32_from_bits(uint32_t b) {
 }
 } // namespace detail
 
-/* One f64 Box-Muller step, cos half first, on the host and on a device. Every multiply-add is an
- * explicit fma, and no plain product feeds a plain sum except b * 4 + 0.5, whose product is exact,
- * so contraction cannot change the bits and a device gives the host's values. */
-TANDEM_FORCE_INLINE Pair2<double> normal_pair_f64(double a, double b) {
-    TANDEM_FP_NOCONTRACT
-    using detail::fmad;
-    /* 1 - a = mant 2^k with mant in [sqrt(1/2), sqrt(2)) from the bits: shifting the exponent
-     * field by the bits of sqrt(1/2) makes the mantissa rollover pick k. */
-    uint64_t ix = detail::f64_bits(1.0 - a) + 0x00095f6200000000u;
-    double nk = (double)(1023 - (int32_t)(ix >> 52)); /* -k, 32-bit so that x86 vectorizes it */
-    double mant = detail::f64_from_bits((ix & 0x000fffffffffffffu) + 0x3fe6a09e00000000u);
-    double s = (mant - 1.0) / (mant + 1.0), zz = s * s;
-    double p = fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, 0.08312363319426472,
-               0.09070001083303751), 0.11111433317907482), 0.14285712049336274),
-               0.2000000000566491), 0.33333333333331017), 1.0);
-    /* -2 ln(1 - a) = 2 nk ln 2 - 4 s p, with ln 2 split so that nk * ln2_hi is exact. */
-    double r = detail::sqrt_(fmad(nk, 3.816429394731813e-10, fmad(nk, 1.3862943607382476, (s * -4.0) * p)));
-
-    /* Nearest quarter turn q, and the angle left over in [-pi/4, pi/4]. */
-    int64_t q = (int32_t)(b * 4.0 + 0.5); /* in [0, 4], 32-bit conversion for x86 vectors */
-    double f = fmad(-(double)(int32_t)q, 0.25, b), th = f * 6.283185307179586, w = th * th;
-    double hs = fmad(w, fmad(w, fmad(w, fmad(w, fmad(w, 1.5914650986900946e-10,
-                -2.5051097984389413e-08), 2.755731600073921e-06), -0.00019841269836630226),
-                0.008333333333330813), -0.16666666666666669);
-    double hc = fmad(w, fmad(w, fmad(w, fmad(w, fmad(w, 2.0665708703855164e-09,
-                -2.7555858522576447e-07), 2.480158263811954e-05), -0.0013888888882156126),
-                0.04166666666663108), -0.4999999999999997);
-    double sn = th * fmad(w, hs, 1.0), cs = fmad(w, hc, 1.0);
-
-    /* Rotate by q quarter turns with bit operations: odd q swaps the two, bit 1 of q negates
-     * the sine, and bit 1 of q + 1 negates the cosine. */
-    uint64_t qu = (uint64_t)q, sm = (uint64_t)0 - (qu & 1u);
-    uint64_t sb = detail::f64_bits(sn), cb = detail::f64_bits(cs);
-    uint64_t xb = (sb & sm) | (cb & ~sm), yb = (cb & sm) | (sb & ~sm);
-    xb ^= ((qu + 1u) << 62) & 0x8000000000000000u;
-    yb ^= (qu << 62) & 0x8000000000000000u;
-    return Pair2<double>{r * detail::f64_from_bits(xb), r * detail::f64_from_bits(yb)};
-}
-
-/* m pairs of uniforms u[2j], u[2j + 1] in [0, 1) to normals z[2j] (cos half), z[2j + 1] (sin
- * half). The arrays must not overlap. Host only. */
-TANDEM_NOINLINE_NOFMA inline void normal_block_f64(const double *__restrict u,
-                                                   double *__restrict z, size_t m) {
-    TANDEM_FP_NOCONTRACT
-#if defined(__clang__)
-#pragma clang loop interleave_count(8)
-#endif
-    for (size_t j = 0; j < m; j++) {
-        Pair2<double> p = normal_pair_f64(u[2u * j], u[2u * j + 1u]);
-        z[2u * j] = p.z0;
-        z[2u * j + 1u] = p.z1;
-    }
-}
-
 TANDEM_NOINLINE_NOFMA inline void normal_block_f32(const float *__restrict u,
                                                    float *__restrict z, size_t m) {
     TANDEM_FP_NOCONTRACT
@@ -519,19 +453,6 @@ TANDEM_NOINLINE_NOFMA inline void normal_block_f32(const float *__restrict u,
     }
 }
 
-/* Both halves of one Box-Muller step: z0 = r cos(2 pi b), z1 = r sin(2 pi b), with
- * r = sqrt(-2 log(1 - a)). The polynomial step above, on a device as on a host, so f64 normals
- * agree bit for bit everywhere, with tandem-c too. */
-TANDEM_FN Pair2<double> box_muller2(double a, double b) {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    return normal_pair_f64(a, b);
-#else
-    double u[2] = {a, b}, z[2];
-    normal_block_f64(u, z, 1);
-    return Pair2<double>{z[0], z[1]};
-#endif
-}
-
 /* The same in float: on a device precise logf and sincospif, on a host normal_block_f32. */
 TANDEM_FN Pair2<float> box_muller2_f32(float a, float b) {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
@@ -546,7 +467,6 @@ TANDEM_FN Pair2<float> box_muller2_f32(float a, float b) {
 }
 
 /* The cos half alone: Box-Muller from two draws a and b in [0, 1), u = 1 - a in (0, 1]. */
-TANDEM_FN double box_muller(double a, double b) { return box_muller2(a, b).z0; }
 TANDEM_FN float box_muller_f32(float a, float b) {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return std::sqrt(-2.0f * std::log(1.0f - a)) * std::cos(2.0f * 3.14159265358979323846f * b);
@@ -555,22 +475,28 @@ TANDEM_FN float box_muller_f32(float a, float b) {
 #endif
 }
 
-/* Standard exponential -ln(1 - u) of a uniform u (spec Appendix A), on a host and on a device,
- * with the logarithm of the host normals: -ln x = (2 nk ln 2 - 4 s p) / 2, and the halving is
- * exact. Every multiply-add is an explicit fma and no plain product feeds a plain sum, so
- * contraction cannot change the bits, and every host and device returns tandem-c's values. A
- * device build with -use_fast_math or -prec-div=false rounds the division differently. */
-TANDEM_FN double exponential_f64(double u) {
-    using detail::fmad;
-    uint64_t ix = detail::f64_bits(1.0 - u) + 0x00095f6200000000u;
+namespace detail {
+/* L(x) = -2 ln x for x in (0, 1], the reference logarithm of spec Appendix A (tandem-c's
+ * neg2_log_f64): x = m 2^k with m in [sqrt(1/2), sqrt(2)) from the exponent bits, then
+ * L = -2 k ln 2 - 4 s p(s^2) with s = (m - 1) / (m + 1). Every multiply-add is an explicit fma
+ * and no plain product feeds a plain sum, so contraction cannot change the bits, and every host
+ * and device returns tandem-c's values. A device build with -use_fast_math or -prec-div=false
+ * rounds the division differently. */
+TANDEM_FN double neg2_log_f64(double x) {
+    uint64_t ix = f64_bits(x) + 0x00095f6200000000u;
     double nk = (double)(1023 - (int32_t)(ix >> 52)); /* -k */
-    double mant = detail::f64_from_bits((ix & 0x000fffffffffffffu) + 0x3fe6a09e00000000u);
+    double mant = f64_from_bits((ix & 0x000fffffffffffffu) + 0x3fe6a09e00000000u);
     double s = (mant - 1.0) / (mant + 1.0), zz = s * s;
     double p = fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, 0.08312363319426472,
                0.09070001083303751), 0.11111433317907482), 0.14285712049336274),
                0.2000000000566491), 0.33333333333331017), 1.0);
-    return 0.5 * fmad(nk, 3.816429394731813e-10, fmad(nk, 1.3862943607382476, (s * -4.0) * p));
+    return fmad(nk, 3.816429394731813e-10, fmad(nk, 1.3862943607382476, (s * -4.0) * p));
 }
+} // namespace detail
+
+/* Standard exponential -ln(1 - u) of a uniform u (spec Appendix A), on a host and on a device:
+ * L(1 - u) / 2 with the reference logarithm, where 1 - u and the halving are exact. */
+TANDEM_FN double exponential_f64(double u) { return 0.5 * detail::neg2_log_f64(1.0 - u); }
 
 TANDEM_FN float exponential_f32(float u) {
     using detail::fmaf_;
@@ -721,24 +647,23 @@ template <class D> class Draws {
     TANDEM_FN double drand(double range) { return range * drand(); }
     TANDEM_FN double drand(double start, double end) { return start + (end - start) * drand(); }
 
-    /* Standard normal by Box-Muller from two Float64 draws, the first mapped to (0, 1]. */
-    TANDEM_FN double normal() {
-        double a = drand();
-        return box_muller(a, drand());
-    }
-    /* Standard normal in float from two Float32 draws (64 bits, as two frand calls). The f32
-     * normal consumes two f32 uniforms and the f64 normal two f64 uniforms. The f32 arithmetic is
-     * float throughout, so results agree across ports and devices to a few ulps, not bit for bit,
-     * because libm float transcendentals differ. The uniforms themselves are exact. */
+    /* Standard normal by the ziggurat from one UInt64 draw, element 0 of a normal fill that starts
+     * here. Bit identical to tandem-c on every host and device. */
+    TANDEM_FN double normal();
+    /* Standard normal in float by Box-Muller from two Float32 draws (64 bits, as two frand
+     * calls). The arithmetic is float throughout, so results agree across ports and devices to a
+     * few ulps, not bit for bit, because libm float transcendentals differ. The uniforms
+     * themselves are exact. */
     TANDEM_FN float normalf() {
         float a = frand();
         return box_muller_f32(a, frand());
     }
-    /* The pair of a Box-Muller step from two uniforms, cos half first. normal() and normalf()
-     * are its first half, and a normal fill equals the flattened sequence of these calls. */
+    /* Two normals, so that a normal fill equals the flattened sequence of these calls: two
+     * ziggurat draws in f64, and in f32 the pair of a Box-Muller step from two uniforms, cos half
+     * first, whose first half is normalf(). */
     TANDEM_FN Pair2<double> normal2() {
-        double a = drand();
-        return box_muller2(a, drand());
+        double z0 = normal();
+        return Pair2<double>{z0, normal()};
     }
     TANDEM_FN Pair2<float> normalf2() {
         float a = frand();
@@ -835,6 +760,110 @@ class Rng : public Draws<Rng> {
     TANDEM_FN const GenState &st() const { return s_; }
 };
 
+/* Float64 normals by the 1024-layer ziggurat of spec Appendix A, one 64-bit draw r per element:
+ * bits 0-9 pick the layer i, bit 10 the sign, bits 11-63 the magnitude ra, and x = +-ra W[i] is
+ * the normal when ra < K[i], 99.57 % of the time. Otherwise the element continues on draws of the
+ * fallback split(g) of sub(PURPOSE_NORMAL64) of the generator with the fill's key at position 0,
+ * where g is the global index of r: the fill's start aligned to 64 bits, over 64, plus the
+ * element index. A fill cut at any element therefore equals the whole fill. The purpose is
+ * reserved for this. With the tables of normal_tables.hpp and the reference logarithm, every
+ * host and device returns tandem-c's values bit for bit. */
+constexpr uint64_t PURPOSE_NORMAL64 = 0x4e524d3634ull; /* "NRM64" */
+
+/* Retry loops and slow paths sit out of line: they are rare, and inlining a generator's seeding
+ * into every element costs registers on the common path. */
+#if defined(__GNUC__) || defined(__clang__)
+#define TANDEM_COLD __attribute__((noinline))
+#else
+#define TANDEM_COLD
+#endif
+
+namespace detail {
+/* The width and threshold of the layer of draw r, one 16-byte read. Device passes read their own
+ * copy of the tables through the read-only cache. */
+TANDEM_FN zig::Layer zig_layer(uint64_t r) {
+#if defined(__CUDA_ARCH__)
+    ulonglong2 v = __ldg(reinterpret_cast<const ulonglong2 *>(zig::WK_DEVICE) + (r & 1023u));
+    return zig::Layer{__longlong_as_double((long long)v.x), v.y};
+#elif defined(__HIP_DEVICE_COMPILE__)
+    return zig::WK_DEVICE[r & 1023u];
+#else
+    return zig::WK[r & 1023u];
+#endif
+}
+TANDEM_FN double zig_y(unsigned i) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return zig::Y_DEVICE[i];
+#else
+    return zig::Y[i];
+#endif
+}
+/* A sum rounded once: device code would fuse a product into it. */
+TANDEM_FN double add_rn(double a, double b) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return __dadd_rn(a, b);
+#else
+    return a + b;
+#endif
+}
+} // namespace detail
+
+/* The fast path of draw r: the value +-ra W[i], exact also when it misses, and whether it hits.
+ * ra converts to Float64 exactly, and the sign flips the sign bit, which gives -0.0 for ra = 0
+ * with the sign set. */
+TANDEM_FN double normal_f64_fast(uint64_t r, bool &hit) {
+    zig::Layer l = detail::zig_layer(r);
+    uint64_t ra = r >> 11;
+    hit = ra < l.k;
+    double x = (double)ra * l.w;
+    return detail::f64_from_bits(detail::f64_bits(x) ^ ((r & 1024u) << 53));
+}
+
+/* The ziggurat's continuation after a miss (spec Appendix A). Every operation outside the
+ * reference logarithm rounds once: the wedge's product is an fma with a zero addend and its sum
+ * add_rn, so no compiler fuses them, and no other product feeds a sum. ln y < -x^2 / 2 replaces
+ * y < f(x), so the logarithm is the only transcendental function. */
+TANDEM_COLD TANDEM_FN double normal_f64_slow(uint64_t r, const uint32_t key[4], uint32_t K,
+                                             uint64_t g) {
+    using namespace detail;
+    Rng fb = Rng::from_key(Key{{key[0], key[1], key[2], key[3]}}, 0, K)
+                 .sub(PURPOSE_NORMAL64)
+                 .split(g);
+    bool hit;
+    double x = normal_f64_fast(r, hit);
+    for (;;) {
+        unsigned i = (unsigned)r & 1023u;
+        if (i == 0) { /* the tail beyond R, Marsaglia's method */
+            double a, b;
+            do {
+                a = exponential_f64(fb.drand()) / zig::R;
+                b = exponential_f64(fb.drand());
+            } while (b + b < a * a);
+            double t = zig::R + a;
+            return (r >> 10) & 1u ? -t : t;
+        }
+        /* u (Y[i + 1] - Y[i]) >= 0, so the zero addend leaves the product's bits alone. */
+        double y = add_rn(zig_y(i), fmad(fb.drand(), zig_y(i + 1) - zig_y(i), 0.0));
+        if (-0.5 * neg2_log_f64(y) < -0.5 * (x * x)) return x;
+        r = fb.urand64();
+        x = normal_f64_fast(r, hit);
+        if (hit) return x;
+    }
+}
+
+/* The normal of draw r with global draw index g, under the key and K of its generator. */
+TANDEM_FN double normal_f64(uint64_t r, const uint32_t key[4], uint32_t K, uint64_t g) {
+    bool hit;
+    double x = normal_f64_fast(r, hit);
+    return hit ? x : normal_f64_slow(r, key, K, g);
+}
+
+template <class D> TANDEM_FN double Draws<D>::normal() {
+    GenState &g = st();
+    uint64_t index = align_pos(g.pos, 64) >> 6;
+    return normal_f64(urand64(), g.key, g.K, index);
+}
+
 /* Parallel bounded fills cannot know how many draws earlier elements rejected, so element e
  * of a fill takes the draw at its own index and consumes exactly one draw. A rejected first
  * draw retries with Lemire's rule on the draws of a fallback generator, split(g) of
@@ -845,14 +874,6 @@ class Rng : public Draws<Rng> {
  * probability (2^32 mod range) / 2^32, or the 64-bit analogue. */
 constexpr uint64_t PURPOSE_BELOW32 = 0x424c573332ull; /* "BLW32" */
 constexpr uint64_t PURPOSE_BELOW64 = 0x424c573634ull; /* "BLW64" */
-
-/* The retry loops sit out of line: a rejection is rare, and inlining a generator's seeding into
- * every bounded fill costs registers on the common path. */
-#if defined(__GNUC__) || defined(__clang__)
-#define TANDEM_COLD __attribute__((noinline))
-#else
-#define TANDEM_COLD
-#endif
 
 TANDEM_COLD TANDEM_FN uint32_t below_retry_u32(uint32_t range, uint32_t t, const uint32_t key[4],
                                                uint32_t K, uint64_t g) {

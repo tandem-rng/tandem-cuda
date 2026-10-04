@@ -71,22 +71,25 @@ template <class T> struct below : detail::stream_ref {
     }
 };
 
-/* Standard normals, double or float, as fill_normal_f64 and fill_normal_f32: element 2j is the
- * cos half and 2j + 1 the sin half of the Box-Muller step of the uniforms 2j and 2j + 1. The
- * float version uses the precise step, so it can differ from the fill by a few ulps. */
+/* Standard normals, double or float, as fill_normal_f64 and fill_normal_f32. Element i of the
+ * double version is the ziggurat of UInt64 draw i, with its fallback keyed by the global draw
+ * index as in the fill, so it equals the fill bit for bit. Element 2j of the float version is the
+ * cos half and 2j + 1 the sin half of the Box-Muller step of the uniforms 2j and 2j + 1, with the
+ * precise step, so it can differ from the fill by a few ulps. */
 template <class T> struct normal : detail::stream_ref {
+    uint64_t g0; /* global draw index of element 0 of the double version */
+
     normal(const uint32_t key[4], uint32_t K = DEFAULT_K, uint64_t pos = 0)
-        : detail::stream_ref(key, K, pos) {}
+        : detail::stream_ref(key, K, pos), g0(align_pos(pos, 64) >> 6) {}
 
     __host__ __device__ T operator()(uint64_t i) const {
         device_rng r = rng();
-        uint64_t j = i >> 1;
         if constexpr (std::is_same<T, float>::value) {
+            uint64_t j = i >> 1;
             Pair2<float> z = box_muller2_f32(r.at_frand(2 * j), r.at_frand(2 * j + 1));
             return (i & 1u) ? z.z1 : z.z0;
         } else {
-            Pair2<double> z = box_muller2(r.at_drand(2 * j), r.at_drand(2 * j + 1));
-            return (i & 1u) ? z.z1 : z.z0;
+            return normal_f64(r.at_urand64(i), key, K, g0 + i);
         }
     }
 };
