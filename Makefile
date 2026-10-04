@@ -22,9 +22,9 @@ CXX_HOST = $(HOSTCXX)
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test bench clangcuda host vectors cross clean
+.PHONY: build test thrust bench clangcuda host vectors cross clean
 
-build: tests/test_cuda tools/bench
+build: tests/test_cuda tests/test_thrust tools/bench
 
 tandem_c.o: $(TANDEM_C)/tandem.c $(TANDEM_C)/tandem.h
 	$(CC) -std=c99 -O2 -c -o $@ $<
@@ -32,11 +32,18 @@ tandem_c.o: $(TANDEM_C)/tandem.c $(TANDEM_C)/tandem.h
 tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(HEADERS) tandem_c.o
 	$(NVCC) $(NVCCFLAGS) -Iinclude -I$(TANDEM_C) -o $@ tests/test_cuda.cu tandem_c.o $(LINK)
 
+tests/test_thrust: tests/test_thrust.cu tandem_thrust.cuh $(HEADERS)
+	$(NVCC) $(NVCCFLAGS) -Iinclude -o $@ tests/test_thrust.cu $(LINK)
+
+thrust: tests/test_thrust
+	./tests/test_thrust tests/data
+
 tools/bench: tools/bench.cu $(HEADERS)
 	$(NVCC) $(NVCCFLAGS) -Iinclude -o $@ tools/bench.cu -lcurand $(LINK)
 
-test: tests/test_cuda
+test: tests/test_cuda tests/test_thrust
 	./tests/test_cuda tests/data
+	./tests/test_thrust tests/data
 
 bench: tools/bench
 	./tools/bench
@@ -73,4 +80,4 @@ cross:
 	./tools/gen_cross_fill_normal > tests/cross_fill_normal.h
 
 clean:
-	rm -f tandem_c.o tests/test_clangcuda tests/test_cuda tests/host_core tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal
+	rm -f tandem_c.o tests/test_clangcuda tests/test_thrust tests/test_cuda tests/host_core tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal

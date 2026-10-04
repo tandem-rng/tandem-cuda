@@ -42,6 +42,13 @@ It produces the stream the specification defines, bit for bit.
   and `normalf()`/`normalf2()` by Box-Muller (the `f` forms in float from two f32 uniforms), `at_urand/urand64/frand/drand(i)`, `child`, `split`, `sub` and `fork`.
   Bounded draws and normals are not part of the specification. They match `tandem_u32_below`,
   `tandem_u64_below` and `tandem_normal_f64` of the C library.
+- `tandem_thrust.cuh`: Thrust and CUB adapters. `tandem::uniform<T>` (u32, u64, f32, f64),
+  `tandem::below<T>` (u32, u64) and `tandem::normal<T>` (f32, f64) are functors from an index `i`
+  to element `i` of the fill of the same type, built on the device generator's random access.
+  `tandem::make_iterator(f, first)` wraps one in a `transform_iterator` over a
+  `counting_iterator`, for `thrust::reduce`, `thrust::copy_n`, `thrust::transform` and CUB. A
+  normal iterator yields the cos half at `2j` and the sin half at `2j + 1` of the uniforms `2j`
+  and `2j + 1`. Header only, and Thrust ships with the toolkit.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
   from `core.hpp`.
 
@@ -136,6 +143,13 @@ The library is headers, so copy `tandem.cuh` and `include/tandem/` or put them o
 (`conda/recipe.yaml`) that install both. Neither is submitted to Spack or conda-forge yet, and both
 build from the `main` branch.
 
+```cpp
+#include "tandem_thrust.cuh"
+
+auto it = tandem::make_iterator(tandem::uniform<uint64_t>(key, 32));     // element i of fill_u64
+uint64_t sum = thrust::reduce(it, it + n, (uint64_t)0);                  // no buffer
+```
+
 ## Tests
 
 GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80` and checks
@@ -145,6 +159,11 @@ host:
 ```sh
 make test TANDEM_C=../tandem-c      # or: pixi install && pixi run test
 ```
+
+`tests/test_thrust.cu` (`make thrust`) checks that the functors and iterators equal the fills at
+random keys, `K`, positions and lengths, for every type and for bounded ranges that reject, that
+they match the stream dumps, and that `thrust::reduce`, `thrust::copy_n` and
+`cub::DeviceReduce::Sum` read an iterator correctly. Normals match the fills to the tolerances above.
 
 `tests/test_cuda.cu` checks every vector of the specification, compares device fills and
 device scalar draws with reference stream dumps in `tests/data` (the bool, u8 and f16 dumps
@@ -183,7 +202,9 @@ with CUDA 12.8, clang 19 and C++20; the CUDA 13 environments are compiled but no
 
 NVIDIA A100 40 GB (PCIe), CUDA 12.8 built by clang 19 as the nvcc host compiler with `-std=c++20` (`pixi run -e cuda12 make bench`): 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
-the run. Consecutive runs agreed within 1%, except the f64 normal rows within 7%. The elements are
+the run. Consecutive runs agreed within 1%, except the f64 normal rows within 7%. The Thrust rows are 11 to 21 times slower than the fills,
+because each element reaches its block by random access. They are for values used once, without a
+buffer. The elements are
 2^28 of each type, so the rows for narrow types write fewer bytes.
 
 | | GiB/s written |
@@ -205,6 +226,8 @@ the run. Consecutive runs agreed within 1%, except the f64 normal rows within 7%
 | `tandem::fill_normal_f64` | 750 |
 | `tandem::fill_normal_f64`, start at an odd Float64 draw | 595 |
 | `tandem::fill_normal_f32` | 1290 |
+| `thrust::transform` of `tandem::uniform<uint32_t>` into a device vector | 65 |
+| `thrust::transform` of `tandem::uniform<double>` into a device vector | 125 |
 | cuRAND Philox4x32-10 `curandGenerate` | 1306 |
 | cuRAND Philox4x32-10 `curandGenerateUniform` | 1311 |
 | cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 795 |

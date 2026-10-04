@@ -6,7 +6,10 @@
 
 #include <curand.h>
 
-#include "../tandem.cuh"
+#include <thrust/device_ptr.h>
+#include <thrust/transform.h>
+
+#include "../tandem_thrust.cuh"
 
 #define CUDA_CHECK(call)                                                                           \
     do {                                                                                           \
@@ -78,6 +81,16 @@ int main() {
     std::printf("%-34s %10.0f\n", "tandem fill_f64, tile kernel",
                 best_gibs(N * 8, [&] { tandem::fill_f64(key, 0, 32, f64, N); }));
 
+    // The Thrust functors reach each block by random access, so they are far slower than a fill.
+    {
+        auto idx0 = thrust::counting_iterator<uint64_t>(0), idx1 = thrust::counting_iterator<uint64_t>(N);
+        tandem::uniform<uint32_t> fu(key, 32);
+        tandem::uniform<double> fd(key, 32);
+        std::printf("%-34s %10.0f\n", "thrust::transform uniform<u32>",
+                    best_gibs(N * 4, [&] { thrust::transform(idx0, idx1, thrust::device_pointer_cast(u32), fu); }));
+        std::printf("%-34s %10.0f\n", "thrust::transform uniform<f64>",
+                    best_gibs(N * 8, [&] { thrust::transform(idx0, idx1, thrust::device_pointer_cast(f64), fd); }));
+    }
     auto u16 = static_cast<uint16_t *>(buf);
     auto u8 = static_cast<uint8_t *>(buf);
     auto b8 = static_cast<bool *>(buf);
