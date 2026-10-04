@@ -4,6 +4,7 @@
 // Run: make host
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <type_traits>
 #include <vector>
 #include "tandem/core.hpp"
@@ -14,7 +15,53 @@ extern "C" {
 
 static int bad;
 
-int main() {
+// tandem-c's tests/test_normal_bits.c: the same fills hashed the same way give the same value on
+// every compiler and target, which the explicit fused multiply-adds make hold.
+constexpr uint64_t NORMAL_BITS_HASH = 0x9414e1315e2653beull;
+
+static uint64_t fnv(uint64_t h, const void *p, size_t n) {
+    const unsigned char *b = static_cast<const unsigned char *>(p);
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    return h;
+}
+
+static void block(const double *u, double *z, size_t m) { tandem::normal_block_f64(u, z, m); }
+static void block(const float *u, float *z, size_t m) { tandem::normal_block_f32(u, z, m); }
+
+// tandem-c's tools/dump_normals.c: an odd count, so the last element is the scalar cos half and
+// both the vector body and the one-pair path take part.
+template <class T, class Uniform, class Normal>
+static void normal_fill(tandem::Rng &g, std::vector<T> &u, std::vector<T> &z, Uniform uniform,
+                        Normal normal) {
+    for (auto &x : u) x = uniform(g);
+    block(u.data(), z.data(), u.size() / 2);
+    z.back() = normal(g);
+}
+
+static uint64_t normal_bits(FILE *dump) {
+    const size_t pairs = 1000000;
+    const uint64_t starts[] = {0, 1, 77, 12345, 1u << 30};
+    std::vector<double> u(2 * (pairs - 1)), z(2 * pairs - 1);
+    std::vector<float> uf(2 * (pairs - 1)), zf(2 * pairs - 1);
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint64_t s : starts) {
+        tandem::Rng g(2026, 7, 0);
+        g.set_position(s);
+        normal_fill(g, u, z, [](tandem::Rng &r) { return r.drand(); },
+                    [](tandem::Rng &r) { return r.normal(); });
+        h = fnv(h, z.data(), z.size() * sizeof z[0]);
+        if (dump) std::fwrite(z.data(), sizeof z[0], z.size(), dump);
+        normal_fill(g, uf, zf, [](tandem::Rng &r) { return r.frand(); },
+                    [](tandem::Rng &r) { return r.normalf(); });
+        h = fnv(h, zf.data(), zf.size() * sizeof zf[0]);
+        if (dump) std::fwrite(zf.data(), sizeof zf[0], zf.size(), dump);
+    }
+    return h;
+}
+
+int main(int argc, char **argv) {
+    // --dump writes the bytes of tandem-c's tools/dump_normals, for cmp against it.
+    if (argc > 1 && std::strcmp(argv[1], "--dump") == 0) return normal_bits(stdout), 0;
     static_assert(std::is_trivially_copyable<tandem::Rng>::value, "copy");
     tandem::Rng r(42, 0, 32);
     tandem_rng c = tandem_from_key(r.key().w, 0, 32);
@@ -89,6 +136,10 @@ int main() {
             bad += !(std::fabs(v - f.out[i]) <= 8 * 0x1p-23f * std::fabs(f.out[i]) + 1e-6f);
         }
     }
+    uint64_t h = normal_bits(nullptr);
+    bad += h != NORMAL_BITS_HASH;
+    std::printf("normal bits: hash %016llx, expected %016llx\n", (unsigned long long)h,
+                (unsigned long long)NORMAL_BITS_HASH);
     std::printf("host core: %s\n", bad ? "FAIL" : "ok");
     return bad != 0;
 }

@@ -337,16 +337,16 @@ template <class T> struct Pair2 {
  * turn is a swap and a sign change. The maximum error is 9.9e-16 relative in f64 and 3.3 ulps in
  * f32 against libm.
  *
- * Contraction is off in the loops and the multiply-adds are explicit where the target has them,
- * so the vector body and the scalar remainder do the same arithmetic. One out-of-line body per
- * precision keeps the scalar draws and the fills bit identical. */
+ * Contraction is off in the loops and every multiply-add is an explicit fused one, so every
+ * compiler and target, the vector body and the scalar remainder do the same arithmetic. One
+ * out-of-line body per precision keeps the scalar draws and the fills bit identical. */
 #if defined(__clang__)
 #define TANDEM_FP_NOCONTRACT _Pragma("clang fp contract(off)")
 #else
 #define TANDEM_FP_NOCONTRACT
 #endif
 #if defined(__GNUC__) && !defined(__clang__)
-#define TANDEM_NOINLINE_NOFMA __attribute__((noinline, optimize("fp-contract=off")))
+#define TANDEM_NOINLINE_NOFMA __attribute__((noinline, optimize("no-math-errno", "fp-contract=off")))
 #elif defined(__GNUC__) || defined(__clang__)
 #define TANDEM_NOINLINE_NOFMA __attribute__((noinline))
 #else
@@ -363,16 +363,11 @@ inline float sqrt_(float x) { return __builtin_elementwise_sqrt(x); }
 inline double sqrt_(double x) { return std::sqrt(x); }
 inline float sqrt_(float x) { return std::sqrt(x); }
 #endif
-#if defined(__FP_FAST_FMA)
+/* Every multiply-add of the normal loops is an explicit fused multiply-add, so that every
+ * compiler and target gives the same bits, as in tandem-c. Without a fused instruction std::fma
+ * is a correct but slow library call that cannot vectorize: build with -mfma on x86. */
 inline double fmad(double x, double y, double z) { return std::fma(x, y, z); }
-#else
-inline double fmad(double x, double y, double z) { return x * y + z; }
-#endif
-#if defined(__FP_FAST_FMAF)
 inline float fmaf_(float x, float y, float z) { return std::fma(x, y, z); }
-#else
-inline float fmaf_(float x, float y, float z) { return x * y + z; }
-#endif
 } // namespace detail
 
 /* m pairs of uniforms u[2j], u[2j + 1] in [0, 1) to normals z[2j] (cos half), z[2j + 1] (sin
@@ -401,7 +396,7 @@ TANDEM_NOINLINE_NOFMA inline void normal_block_f64(const double *__restrict u,
                    0.09070001083303751), 0.11111433317907482), 0.14285712049336274),
                    0.2000000000566491), 0.33333333333331017), 1.0);
         /* -2 ln(1 - a) = 2 nk ln 2 - 4 s p, with ln 2 split so that nk * ln2_hi is exact. */
-        double r = detail::sqrt_(fmad(nk, 1.3862943607382476, (s * -4.0) * p) + nk * 3.816429394731813e-10);
+        double r = detail::sqrt_(fmad(nk, 3.816429394731813e-10, fmad(nk, 1.3862943607382476, (s * -4.0) * p)));
 
         /* Nearest quarter turn q, and the angle left over in [-pi/4, pi/4]. */
         int64_t q = (int32_t)(b * 4.0 + 0.5); /* in [0, 4], 32-bit conversion for x86 vectors */
@@ -450,7 +445,7 @@ TANDEM_NOINLINE_NOFMA inline void normal_block_f32(const float *__restrict u,
         std::memcpy(&mant, &ix, 4);
         float s = (mant - 1.0f) / (mant + 1.0f), zz = s * s;
         float p = fmaf_(zz, fmaf_(zz, fmaf_(zz, 0.14275366f, 0.20000061f), 0.33333334f), 1.0f);
-        float r = detail::sqrt_(fmaf_(nk, 1.38629150390625f, (s * -4.0f) * p) + nk * 2.857213530660374e-06f);
+        float r = detail::sqrt_(fmaf_(nk, 2.857213530660374e-06f, fmaf_(nk, 1.38629150390625f, (s * -4.0f) * p)));
 
         int32_t q = (int32_t)(b * 4.0f + 0.5f);
         float f = fmaf_(-(float)q, 0.25f, b);

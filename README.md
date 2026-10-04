@@ -80,10 +80,12 @@ normals agree across platforms to about 1e-15 relative, not bit for bit.
 On a host, `box_muller2` and `box_muller2_f32` in `core.hpp` do not call libm. They are the
 polynomial form of tandem-c: the logarithm from the exponent bits and a short series, and the
 sine and cosine from an exact quarter-turn reduction and polynomials, at most 9.9e-16 relative in
-f64 and 3.3 ulps in f32 against libm. They are the same arithmetic as the C library's, so host
-builds with the same compiler agree bit for bit, and a scalar `normal2()` equals a pair of a fill.
-`tandem::normal_block_f64` and `normal_block_f32` turn arrays of uniforms into normals for host
-fills, and clang vectorizes them on x86 and Arm without `-ffast-math` (`make hostvec` checks it).
+f64 and 3.3 ulps in f32 against libm. Every multiply-add is an explicit `std::fma` and contraction
+is off, as in tandem-c, so every host compiler and target gives the C library's bits, and a scalar
+`normal2()` equals a pair of a fill. `tandem::normal_block_f64` and `normal_block_f32` turn arrays
+of uniforms into normals for host fills, and clang vectorizes them on Arm and on x86 without
+`-ffast-math` (`make hostvec` checks it). x86 needs `-mfma` (the Makefile passes `-mavx2 -mfma`),
+because without it `std::fma` is a slow library call that gives the same bits.
 
 **Float normals.** `fill_normal_f32` and `Rng::normalf2()` are the same on Float32 draws, in
 float: `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf` and `sqrtf`. The device fill takes the
@@ -196,7 +198,10 @@ generator, which must agree in values and in the final position. The fill compar
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `tests/host_core.cpp` (`make host`) builds `core.hpp` as C++17 with clang and
 gcc and compares the scalar generator with the C library, because tandem-kokkos, tandem-fortran
-and tandem-torch include it with their own standards.
+and tandem-torch include it with their own standards. It also hashes 1e6 pairs of f64 and f32
+normals from five start positions and checks the value of tandem-c's `tests/test_normal_bits.c`.
+`./tests/host_core --dump` writes the bytes of tandem-c's `tools/dump_normals`: they are identical
+on the M4 with clang and on x86 with clang 19, gcc 11 and gcc 14, with and without `-mfma`.
 
 **Toolchains.** `pixi.toml` provides conda-forge environments for hosts without a system install.
 The default is CUDA 13.4 (nvcc 13.4.92) with clang 20 as the host compiler and `-std=c++23`, with

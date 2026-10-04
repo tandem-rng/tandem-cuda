@@ -15,6 +15,9 @@ NVCCFLAGS += -ccbin $(HOSTCXX)
 export NVCC_PREPEND_FLAGS :=
 CC = $(HOSTCC)
 CXX_HOST = $(HOSTCXX)
+# The host normal loops use explicit fused multiply-adds, which x86 needs flags to compile to
+# one vectorizable instruction. Without them std::fma is a slow library call with the same bits.
+FMAFLAGS := $(if $(filter x86_64 amd64,$(shell uname -m)),-mavx2 -mfma,)
 
 # Binaries find the CUDA libraries that belong to the nvcc that built them, also inside a
 # conda environment. The environment's LDFLAGS are gcc flags that nvcc rejects, so they
@@ -27,7 +30,7 @@ LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 build: tests/test_cuda tests/test_thrust tools/bench
 
 tandem_c.o: $(TANDEM_C)/tandem.c $(TANDEM_C)/tandem.h
-	$(CC) -std=c99 -O2 -c -o $@ $<
+	$(CC) -std=c99 -O2 -ffp-contract=off $(FMAFLAGS) -c -o $@ $<
 
 tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(HEADERS) tandem_c.o
 	$(NVCC) $(NVCCFLAGS) -Iinclude -I$(TANDEM_C) -o $@ tests/test_cuda.cu tandem_c.o $(LINK)
@@ -61,16 +64,17 @@ tests/test_clangcuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.
 clangcuda: tests/test_clangcuda
 	./tests/test_clangcuda tests/data
 
-# core.hpp must stay valid C++17 for its other consumers, so this build pins the standard.
+# core.hpp must stay valid C++17 for its other consumers, so this build pins the standard. The
+# test checks that the normals hash to tandem-c's tests/test_normal_bits.c value.
 tests/host_core: tests/host_core.cpp include/tandem/core.hpp tests/cross_fill_normal.h tandem_c.o
-	$(CXX_HOST) -std=c++17 -O2 -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ tests/host_core.cpp tandem_c.o
+	$(CXX_HOST) -std=c++17 -O2 $(FMAFLAGS) -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ tests/host_core.cpp tandem_c.o
 
 host: tests/host_core
 	./tests/host_core
 
 # The host Box-Muller blocks must vectorize under clang, which is what makes them fast.
 hostvec:
-	$(CXX_HOST) -std=c++17 -O2 -Iinclude -I$(TANDEM_C) -Rpass=loop-vectorize -c -o /dev/null tests/host_core.cpp 2>&1 \
+	$(CXX_HOST) -std=c++17 -O2 $(FMAFLAGS) -Iinclude -I$(TANDEM_C) -Rpass=loop-vectorize -c -o /dev/null tests/host_core.cpp 2>&1 \
 	  | grep "core.hpp" | grep -c "vectorized loop" | awk '{ if ($$1 < 2) { print "normal blocks not vectorized"; exit 1 } else print "normal blocks vectorized" }'
 
 # Regenerate the vector header from a checkout of https://github.com/tandem-rng/spec.
