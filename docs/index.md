@@ -1,8 +1,12 @@
-# tandem-cuda documentation
+# tandem-cuda
+
+Header-only CUDA implementation of Tandem8x32. It produces the stream of the
+[specification](https://github.com/tandem-rng/spec/blob/main/SPEC.md) bit for bit, and fills
+A100 memory at about 1390 GiB/s.
 
 - [API](api.md): the fills, the host `generator`, `device_rng`, the Thrust adapters and parallel use.
 - [Design](design.md): the contract of the bounded, normal and exponential fills.
-- [Tests](tests.md): what the suite checks.
+- [Tests](tests.md): what the suite checks and what CI runs.
 - [Speed](speed.md): A100 figures against cuRAND.
 
 ## Install
@@ -14,7 +18,7 @@ build from the `main` branch.
 
 Put `include/` on the include path, for example `nvcc -I<tandem-cuda>/include`.
 
-## Toolchains
+### Toolchains
 
 `pixi.toml` provides conda-forge environments for hosts without a system install.
 The default is CUDA 13.4 (nvcc 13.4.92) with clang 20 as the host compiler and `-std=c++23`, with

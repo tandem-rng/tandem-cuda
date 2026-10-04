@@ -1,10 +1,36 @@
-# Design of the bounded, normal and exponential fills
+# Design
 
 These fills are not part of the specification. Other ports should follow the same contract,
 and the C library's `tandem_fill_u32_below` and `tandem_fill_u64_below` give the same values bit
 for bit, rejected draws included.
 
-**Float64 normals.** `fill_normal_f64` is the 1024-layer ziggurat of Appendix A of the
+## Bounded integers
+
+Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
+Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
+`2^32 mod range` (or its 64-bit analogue), result the high word. The threshold `2^32 mod range` is computed once per fill, not per element, which took
+large ranges from 1107 to 1348 GiB/s (`u32`) and from 644 to 1351 (`u64`). The fill consumes exactly `n`
+draws, so it returns `align(pos, w) + w n` at once, without waiting for the device. A sequential
+`Rng::urand(range)` loop would consume extra draws after a rejection, and a parallel fill
+cannot know how many. So a rejected element `e` retries on a fallback stream: draws `0, 1, ...`
+of `split(g)` of `sub(P)` of the fill's generator at position 0 (same key and `K`), with
+`P = 0x424c573332` for 32-bit and `0x424c573634` for 64-bit ranges, until one is accepted. `g` is
+the global draw index `align(pos, w) / w + e` (spec Appendix A), so a fill cut at any element
+boundary, each piece starting where the last ended, equals the whole fill.
+Those two purposes are reserved. A rejection has probability `(2^32 mod range) / 2^32`, so
+ranges that are powers of two never reject, and a fill without rejections equals the sequential
+loop. `range = 0` returns 0 and still consumes the draw. `tests/cross_fill_below.h` holds fixtures for
+ports, bounded fills of 64 elements at several ranges from the key of seed 42, `K = 32`, with the
+rejection counts: `CROSS_BELOW32` and `CROSS_BELOW64` at position 0, where `g = e`, and
+`CROSS_BELOW32_AT` and `CROSS_BELOW64_AT` at the bit positions 1 and 12345 of tandem-c's fixtures,
+where `g` differs from `e`. Regenerate it with `make cross`, which needs only a host
+C++ compiler and `core.hpp`.
+
+## Normals
+
+### Float64
+
+`fill_normal_f64` is the 1024-layer ziggurat of Appendix A of the
 specification. Element `e` comes from UInt64 draw `e` of the fill that starts at `pos` aligned up
 to 64 bits: bits 0-9 pick the layer `i`, bit 10 the sign, bits 11-63 the magnitude `ra`, and
 `x = +-ra W[i]` is the normal when `ra < K[i]`, 99.57 % of the time. A miss continues on the draws
@@ -46,7 +72,9 @@ then cover whole 32-byte sectors. A row 8 bytes off the sectors halved the speed
 finished by another much later, cost 15 %. Both kernels store each block one step late, so that
 the store does not wait for the step's table reads.
 
-**Float normals.** `fill_normal_f32` is Box-Muller on Float32 draws, in float: pair `j`, the
+### Float32
+
+`fill_normal_f32` is Box-Muller on Float32 draws, in float: pair `j`, the
 elements `2j` (cos half) and `2j + 1` (sin half), comes from the draws `2j` and `2j + 1`, as the
 flattened `Rng::normalf2()` calls, with `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf` and
 `sqrtf`. An odd `n` uses the cos half of its last pair and still advances past both draws, and an
@@ -67,7 +95,9 @@ fills at the six starts of tandem-c's `tests/cross_normal.h`, with misses of eve
 everywhere, and f32 fills at even and odd starts, exact on hosts and to the tolerances above on
 devices.
 
-**Exponentials.** `fill_exponential_f64` writes element `i` as `-ln(1 - u)` of Float64 draw `i` of
+## Exponentials
+
+`fill_exponential_f64` writes element `i` as `-ln(1 - u)` of Float64 draw `i` of
 the fill that starts at `pos` aligned up to 64 bits, and `fill_exponential_f32` the same in float
 on Float32 draws aligned up to 32 bits, as Appendix A of the specification defines them. A fill
 consumes `n` draws, equals the `Rng::exponential()` (`exponentialf()`) calls, and an empty fill
@@ -81,23 +111,3 @@ division and breaks that. The maximum error is 1.1e-15 relative in f64 and 2.8e-
 fills run the direct kernel, because the map makes them compute bound and the tile kernel's
 separate write phase lost 7 to 13 % on the A100. `tests/cross_fill_exponential.h` holds fixtures
 for ports at five start positions, unaligned ones included.
-
-**Bounded integers.** Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
-Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
-`2^32 mod range` (or its 64-bit analogue), result the high word. The threshold `2^32 mod range` is computed once per fill, not per element, which took
-large ranges from 1107 to 1348 GiB/s (`u32`) and from 644 to 1351 (`u64`). The fill consumes exactly `n`
-draws, so it returns `align(pos, w) + w n` at once, without waiting for the device. A sequential
-`Rng::urand(range)` loop would consume extra draws after a rejection, and a parallel fill
-cannot know how many. So a rejected element `e` retries on a fallback stream: draws `0, 1, ...`
-of `split(g)` of `sub(P)` of the fill's generator at position 0 (same key and `K`), with
-`P = 0x424c573332` for 32-bit and `0x424c573634` for 64-bit ranges, until one is accepted. `g` is
-the global draw index `align(pos, w) / w + e` (spec Appendix A), so a fill cut at any element
-boundary, each piece starting where the last ended, equals the whole fill.
-Those two purposes are reserved. A rejection has probability `(2^32 mod range) / 2^32`, so
-ranges that are powers of two never reject, and a fill without rejections equals the sequential
-loop. `range = 0` returns 0 and still consumes the draw. `tests/cross_fill_below.h` holds fixtures for
-ports, bounded fills of 64 elements at several ranges from the key of seed 42, `K = 32`, with the
-rejection counts: `CROSS_BELOW32` and `CROSS_BELOW64` at position 0, where `g = e`, and
-`CROSS_BELOW32_AT` and `CROSS_BELOW64_AT` at the bit positions 1 and 12345 of tandem-c's fixtures,
-where `g` differs from `e`. Regenerate it with `make cross`, which needs only a host
-C++ compiler and `core.hpp`.

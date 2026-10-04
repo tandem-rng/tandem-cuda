@@ -1,5 +1,9 @@
 # Speed
 
+`pixi run -e cuda12 make bench` produces the figures.
+
+## GPU
+
 NVIDIA A100 40 GB (PCIe), CUDA 12.8 built by clang 19 as the nvcc host compiler with `-std=c++20` (`pixi run -e cuda12 make bench`): 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
 the run. Consecutive runs agreed within 1%, except the f64 normal rows within 3%. The Thrust rows are 11 to 21 times slower than the fills,
@@ -34,11 +38,6 @@ buffer. The elements are
 | `tandem::fill_exponential_f32` | 1022 |
 | `thrust::transform` of `tandem::uniform<uint32_t>` into a device vector | 65 |
 | `thrust::transform` of `tandem::uniform<double>` into a device vector | 125 |
-| cuRAND Philox4x32-10 `curandGenerate` | 1306 |
-| cuRAND Philox4x32-10 `curandGenerateUniform` | 1311 |
-| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 795 |
-| cuRAND Philox4x32-10 `curandGenerateNormal` | 980 |
-| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 597 |
 
 The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
 as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.
@@ -54,3 +53,15 @@ f32 normal fill is memory bound. The f64 ziggurat runs a table pass and a second
 GiB/s. The exponential fills run into the card's
 250 W power cap on their division and logarithm per element, so they vary by up to 15 % between
 runs.
+
+## Other generators
+
+cuRAND on the same card, with the same method:
+
+| | GiB/s written |
+|---|---|
+| cuRAND Philox4x32-10 `curandGenerate` | 1306 |
+| cuRAND Philox4x32-10 `curandGenerateUniform` | 1311 |
+| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 795 |
+| cuRAND Philox4x32-10 `curandGenerateNormal` | 980 |
+| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 597 |

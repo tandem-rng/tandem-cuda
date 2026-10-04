@@ -1,5 +1,37 @@
 # API
 
+## Use
+
+Put `include/` on the include path, for example `nvcc -I<tandem-cuda>/include`.
+
+```cpp
+#include "tandem.cuh"
+
+const uint32_t key[4] = {1, 2, 3, 4};
+double *x;
+cudaMalloc(&x, n * sizeof(double));
+uint64_t pos = tandem::fill_f64(key, 0, 32, x, n);   // the spec's Float64 fill from position 0
+uint32_t *die;                                       // 6-sided dice, n draws from the UInt32 stream
+cudaMalloc(&die, n * sizeof(uint32_t));
+pos = tandem::fill_u32_below(key, pos, 32, 6, die, n);
+float *z;                                            // standard normals
+cudaMalloc(&z, n * sizeof(float));
+pos = tandem::fill_normal_f32(key, pos, 32, z, n);
+pos = tandem::fill_exponential_f32(key, pos, 32, z, n); // standard exponentials, in place of z
+
+tandem::generator g = tandem::generator::seed(42);   // the same, with the position kept for you
+g.fill_f64(x, n);
+g.fill_u32_below(6, die, n);
+
+__global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float *out) {
+    const uint32_t key[4] = {k0, k1, k2, k3};
+    tandem::device_rng rng = tandem::device_rng::from_key(key, 0, 32).split(blockIdx.x * blockDim.x + threadIdx.x);
+    out[threadIdx.x] = rng.next_f32();
+}
+```
+
+## Reference
+
 - `tandem.cuh`: the CUDA fills and `device_rng`.
 - `include/tandem/core.hpp`: the portable core that `tandem.cuh` builds on. It holds the
   step, the seeding function, the stream layout, the float mappings, child keys, an
@@ -63,36 +95,6 @@
   `normal_f64_fast(r, hit)` is its table step alone.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
   from `core.hpp`.
-
-## Use
-
-Put `include/` on the include path, for example `nvcc -I<tandem-cuda>/include`.
-
-```cpp
-#include "tandem.cuh"
-
-const uint32_t key[4] = {1, 2, 3, 4};
-double *x;
-cudaMalloc(&x, n * sizeof(double));
-uint64_t pos = tandem::fill_f64(key, 0, 32, x, n);   // the spec's Float64 fill from position 0
-uint32_t *die;                                       // 6-sided dice, n draws from the UInt32 stream
-cudaMalloc(&die, n * sizeof(uint32_t));
-pos = tandem::fill_u32_below(key, pos, 32, 6, die, n);
-float *z;                                            // standard normals
-cudaMalloc(&z, n * sizeof(float));
-pos = tandem::fill_normal_f32(key, pos, 32, z, n);
-pos = tandem::fill_exponential_f32(key, pos, 32, z, n); // standard exponentials, in place of z
-
-tandem::generator g = tandem::generator::seed(42);   // the same, with the position kept for you
-g.fill_f64(x, n);
-g.fill_u32_below(6, die, n);
-
-__global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float *out) {
-    const uint32_t key[4] = {k0, k1, k2, k3};
-    tandem::device_rng rng = tandem::device_rng::from_key(key, 0, 32).split(blockIdx.x * blockDim.x + threadIdx.x);
-    out[threadIdx.x] = rng.next_f32();
-}
-```
 
 ## Thrust
 

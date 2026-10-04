@@ -1,18 +1,15 @@
 # Tests
 
-GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80` and checks
-that `tests/vectors.h` and `include/tandem/normal_tables.hpp` match the spec repository's
-`vectors.json` and `tables/normal_f64_zig1024.json`. Run the tests on a GPU
-host:
+Run the tests on a GPU host:
 
 ```sh
 make test TANDEM_C=../tandem-c      # or: pixi install && pixi run test
+make thrust                         # tests/test_thrust.cu
+make host                           # tests/host_core.cpp
+make stats                          # tools/normal_stats.cu, 1e8 f64 normals
 ```
 
-`tests/test_thrust.cu` (`make thrust`) checks that the functors and iterators equal the fills at
-random keys, `K`, positions and lengths, for every type and for bounded ranges that reject, that
-they match the stream dumps, and that `thrust::reduce`, `thrust::copy_n` and
-`cub::DeviceReduce::Sum` read an iterator correctly. Normals match the fills to the tolerances in [design](design.md).
+## Suite
 
 `tests/test_cuda.cu` checks every vector of the specification, compares device fills and
 device scalar draws with reference stream dumps in `tests/data` (the bool, u8 and f16 dumps
@@ -57,3 +54,14 @@ gcc 14 under `-mavx2 -mfma`, also with `-ffp-contract=fast` and `-march=native`.
 code, not in CI: moments 1 to 6 and the counts beyond 3, 3.5, 4, 4.5 and 5 at `|z| < 4`, and the
 Kolmogorov-Smirnov and Anderson-Darling tests at `p > 0.001`. On the A100 the largest `|z|` was
 1.32, KS gave `p = 0.96` and AD `p = 0.97`.
+
+`tests/test_thrust.cu` (`make thrust`) checks that the functors and iterators equal the fills at
+random keys, `K`, positions and lengths, for every type and for bounded ranges that reject, that
+they match the stream dumps, and that `thrust::reduce`, `thrust::copy_n` and
+`cub::DeviceReduce::Sum` read an iterator correctly. Normals match the fills to the tolerances in [design](design.md).
+
+## CI
+
+GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80` and checks
+that `tests/vectors.h` and `include/tandem/normal_tables.hpp` match the spec repository's
+`vectors.json` and `tables/normal_f64_zig1024.json`.
