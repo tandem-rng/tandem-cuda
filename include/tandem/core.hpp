@@ -318,6 +318,13 @@ struct Key {
     uint32_t w[4];
 };
 
+/* Box-Muller entirely in float from two Float32 draws a and b in [0, 1), with the same branch
+ * and the same u = 1 - a in (0, 1] as the Float64 form. Only precise sqrt, log and cos, no
+ * fast-math intrinsics. */
+TANDEM_FN float box_muller_f32(float a, float b) {
+    return std::sqrt(-2.0f * std::log(1.0f - a)) * std::cos(2.0f * 3.14159265358979323846f * b);
+}
+
 /* Box-Muller from two Float64 draws a and b in [0, 1): u = 1 - a is in (0, 1]. */
 TANDEM_FN double box_muller(double a, double b) {
     return std::sqrt(-2.0 * std::log(1.0 - a)) * std::cos(6.283185307179586 * b);
@@ -466,6 +473,14 @@ template <class D> class Draws {
     TANDEM_FN double normal() {
         double a = drand();
         return box_muller(a, drand());
+    }
+    /* Standard normal in float from two Float32 draws (64 bits, as two frand calls). The f32
+     * normal consumes two f32 uniforms and the f64 normal two f64 uniforms. The f32 arithmetic is
+     * float throughout, so results agree across ports and devices to a few ulps, not bit for bit,
+     * because libm float transcendentals differ. The uniforms themselves are exact. */
+    TANDEM_FN float normalf() {
+        float a = frand();
+        return box_muller_f32(a, frand());
     }
     TANDEM_FN double normal(double mean, double std_dev = 1.0) { return mean + std_dev * normal(); }
 

@@ -38,7 +38,7 @@ It produces the stream the specification defines, bit for bit.
   draws follow the specification's scalar rule for the same key and position, mixed widths
   included. The rest of the draw API is `tandem::Rng`'s, shared through `Draws<D>` in
   `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`
-  by Box-Muller, `at_urand/urand64/frand/drand(i)`, `child`, `split`, `sub` and `fork`.
+  and `normalf()` by Box-Muller (`normalf` in float from two f32 uniforms), `at_urand/urand64/frand/drand(i)`, `child`, `split`, `sub` and `fork`.
   Bounded draws and normals are not part of the specification. They match `tandem_u32_below`,
   `tandem_u64_below` and `tandem_normal_f64` of the C library.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,

@@ -318,6 +318,7 @@ struct ApiOut {
     uint64_t at64[API_AT];
     float atf32[API_AT];
     double atf64[API_AT];
+    float normalf[API_N];
     uint64_t fork[API_CHILD], split, sub, pos;
 };
 
@@ -329,6 +330,7 @@ __global__ void api_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, u
         o->below32[i] = r.urand(range32);
         o->below64[i] = r.urand64(range64);
         o->normal[i] = r.normal();
+        o->normalf[i] = r.normalf();
         o->u8[i] = r.next_u8();
         o->u16[i] = r.next_u16();
         o->f16[i] = r.next_f16_bits();
@@ -366,6 +368,9 @@ static void check_device_api(const uint32_t key[4], uint64_t pos, uint32_t K, ui
         bad += g.below64[i] != tandem_u64_below(&c, range64);
         double z = tandem_normal_f64(&c);
         bad += !(std::fabs(g.normal[i] - z) <= 1e-12 * (1.0 + std::fabs(z)));
+        float fa = tandem_next_f32(&c), fb = tandem_next_f32(&c);
+        float zf = sqrtf(-2.0f * logf(1.0f - fa)) * cosf(2.0f * 3.14159265358979323846f * fb);
+        bad += !(std::fabs(g.normalf[i] - zf) <= 4 * 0x1p-23f * (1.0f + std::fabs(zf)));
         bad += g.u8[i] != tandem_next_u8(&c);
         bad += g.u16[i] != tandem_next_u16(&c);
         bad += g.f16[i] != tandem_next_f16_bits(&c);
