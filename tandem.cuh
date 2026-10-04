@@ -366,6 +366,22 @@ inline uint64_t fill_normal(const uint32_t key[4], uint64_t pos, uint32_t K, O *
     return p1;
 }
 
+/* The float Box-Muller step of the fill kernel. It is box_muller2_f32 with the angle through
+ * the fast __sincosf, which with precise logf and sqrtf makes the fill memory bound instead of
+ * compute bound. __sincosf is accurate only on [-pi, pi], so the angle is shifted by half a turn.
+ * The result stays within 16 ulps + 1e-6 of the precise step (measured at most 1.5e-6 absolute).
+ * Define TANDEM_PRECISE_F32_NORMAL for sincospif. __logf is not used: its absolute error near
+ * 1 distorts small radii by thousands of ulps. */
+__device__ __forceinline__ Pair2<float> normal_step_f32(float a, float b) {
+#if defined(TANDEM_PRECISE_F32_NORMAL)
+    return box_muller2_f32(a, b);
+#else
+    float r = sqrtf(-2.0f * logf(1.0f - a)), s, c;
+    __sincosf(6.2831853071795864769f * (b - 0.5f), &s, &c);
+    return Pair2<float>{-r * c, -r * s};
+#endif
+}
+
 /* Float normal fill. Pair j is one float Box-Muller step of the Float32 draws 2j and 2j + 1 of
  * the fill that starts at the position aligned to 32 bits, giving elements 2j and 2j + 1. With
  * s0 the index of the first Float32 draw, a block holds two pairs: slots 0 and 1, 2 and 3 when
@@ -381,6 +397,9 @@ __global__ void __launch_bounds__(THREADS)
     uint64_t g = c >> 3, lane = c & 7u;
     if (g * K * 8u > bb) return;
     const bool vec = (reinterpret_cast<uintptr_t>(out) & 7u) == 0;
+    /* Common case: a block starts a pair, both pairs fit, and the four outputs are one 16-byte
+     * store. */
+    const bool quad = !ODD && (s0 & 3u) == 0 && (reinterpret_cast<uintptr_t>(out) & 15u) == 0;
     const uint32_t key[4] = {key0, key1, key2, key3};
     uint32_t o[4], h[4], po[4] = {0, 0, 0, 0}, ph[4] = {0, 0, 0, 0};
     F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
@@ -391,6 +410,12 @@ __global__ void __launch_bounds__(THREADS)
         T(o, h);
         if (ODD && (lane || j)) T(po, ph);
         if (beta < ba) continue;
+        if (quad && 4u * (beta - ba) + 4u <= n) {
+            Pair2<float> z0 = normal_step_f32(to_f32(o[0]), to_f32(o[1]));
+            Pair2<float> z1 = normal_step_f32(to_f32(o[2]), to_f32(o[3]));
+            *reinterpret_cast<float4 *>(out + 4u * (beta - ba)) = make_float4(z0.z0, z0.z1, z1.z0, z1.z1);
+            continue;
+        }
         /* Index of the pair that starts at slot 4 beta (or 4 beta - 1), then the next one. */
         int64_t e = ((int64_t)(4u * beta) - (ODD ? 1 : 0) - (int64_t)s0) / 2;
         uint32_t q[4];
@@ -404,7 +429,7 @@ __global__ void __launch_bounds__(THREADS)
             if (pj < 0 || pj >= (int64_t)np) continue;
             uint32_t ua = ODD ? (k ? o[1] : prev[3]) : o[2 * k];
             uint32_t ub = ODD ? (k ? o[2] : o[0]) : o[2 * k + 1];
-            Pair2<float> z = box_muller2_f32(to_f32(ua), to_f32(ub));
+            Pair2<float> z = normal_step_f32(to_f32(ua), to_f32(ub));
             uint64_t at = 2u * (uint64_t)pj;
             if (at + 1 < n) {
                 if (vec) *reinterpret_cast<float2 *>(out + at) = make_float2(z.z0, z.z1);

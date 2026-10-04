@@ -550,10 +550,25 @@ static void check_cross_normal(const F &f, double tol) {
     CUDA_CHECK(cudaDeviceSynchronize());
     auto got = d.host();
     size_t bad = 0;
-    for (size_t i = 0; i < f.n; i++)
-        bad += !(std::fabs((double)got[i] - (double)f.out[i]) <= tol * (1.0 + std::fabs((double)f.out[i])));
+    double max_abs = 0, max_ulps = 0; // reported when tuning the float step
+    for (size_t i = 0; i < f.n; i++) {
+        double want = f.out[i], dv = std::fabs((double)got[i] - want);
+        double ulp = std::fabs(want) * 0x1p-23;
+#ifndef TANDEM_PRECISE_F32_NORMAL
+        bool ok = sizeof(T) == 4 ? dv <= 16 * ulp + 1e-6 : dv <= tol * (1.0 + std::fabs(want));
+#else
+        bool ok = dv <= tol * (1.0 + std::fabs(want));
+#endif
+        bad += !ok;
+        max_abs = std::fmax(max_abs, dv);
+        if (std::fabs(want) > 1e-2) max_ulps = std::fmax(max_ulps, dv / ulp);
+    }
+    if (sizeof(T) == 4)
+        std::printf("f32 fixture pos %llu: max deviation %.3g abs, %.3g ulps (|x| > 1e-2)\n",
+                    (unsigned long long)f.pos, max_abs, max_ulps);
     if (bad) {
-        std::printf("FAIL normal fixture at pos %llu: %zu elements differ\n", (unsigned long long)f.pos, bad);
+        std::printf("FAIL normal fixture at pos %llu: %zu elements differ\n",
+                    (unsigned long long)f.pos, bad);
         failures++;
     }
 }
@@ -573,6 +588,7 @@ template <class T, void (*cfill)(tandem_rng *, T *, size_t), unsigned W,
           tandem::Pair2<T> (*step)(T, T),
           uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
 static void check_normal(std::mt19937_64 &gen, const char *label, double tol) {
+    double max_abs = 0, max_ulps = 0; // largest deviation from the host step, for the report
     for (int trial = 0; trial < 80; trial++) {
         uint32_t key[4];
         for (auto &w : key) w = (uint32_t)gen();
@@ -597,9 +613,22 @@ static void check_normal(std::mt19937_64 &gen, const char *label, double tol) {
         CHECK(end == tandem::align_pos(pos, W) + (uint64_t)np * 2u * W);
         CHECK(end == tandem_position(&c));
         size_t bad = 0;
-        for (size_t i = 0; i < n; i++)
-            bad += !(std::fabs((double)got[i] - (double)want[i]) <=
-                     tol * (1.0 + std::fabs((double)want[i])));
+        for (size_t i = 0; i < n; i++) {
+            double dv = std::fabs((double)got[i] - (double)want[i]);
+            double ulp = std::fabs((double)want[i]) * 0x1p-23;
+#ifndef TANDEM_PRECISE_F32_NORMAL
+            bool ok = W == 32 ? dv <= 16 * ulp + 1e-6 : dv <= tol * (1.0 + std::fabs((double)want[i]));
+#else
+            bool ok = dv <= tol * (1.0 + std::fabs((double)want[i]));
+#endif
+            bad += !ok;
+            if (W == 32) {
+                max_abs = std::fmax(max_abs, dv);
+                if (std::fabs((double)want[i]) > 1e-2) max_ulps = std::fmax(max_ulps, dv / ulp);
+            }
+        }
+        if (trial == 79 && W == 32)
+            std::printf("f32 normal fill, max deviation: %.3g abs, %.3g ulps (|x| > 1e-2)\n", max_abs, max_ulps);
         if (bad) {
             std::printf("FAIL %s normal fill: %zu elements differ (trial %d K=%u pos=%llu n=%zu)\n",
                         label, bad, trial, K, (unsigned long long)pos, n);

@@ -64,8 +64,13 @@ chunk per thread to read them, at about 80% of the speed. On a device the angle 
 normals agree across platforms to about 1e-15 relative, not bit for bit.
 
 **Float normals.** `fill_normal_f32` and `Rng::normalf2()` are the same on Float32 draws, in
-float: `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf`, `sqrtf` and `sincospif`, no fast-math
-intrinsics. The fill starts at `pos` aligned up to 32 bits and consumes `64 ceil(n / 2)` bits, so
+float: `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf` and `sqrtf`. The device fill takes the
+angle through the fast `__sincosf` on `2 pi (v - 0.5)`, which is accurate on `[-pi, pi]`, because
+the precise `sincospif` made the fill compute bound at 1065 GiB/s against 1300 memory bound. The
+result stays within 16 ulps + 1e-6 of the precise step: at most 1.5e-6 absolute over the random
+fills and 7.2e-7 on the fixtures, up to 47 ulps for a value near 0.01, where the absolute error
+dominates. `__logf` is not used, because its absolute error near 1 distorts small radii by
+thousands of ulps. Define `TANDEM_PRECISE_F32_NORMAL` for `sincospif` and 4 ulps. The fill starts at `pos` aligned up to 32 bits and consumes `64 ceil(n / 2)` bits, so
 a block holds two pairs and a start at an odd Float32 draw makes some span two blocks. It does
 not round the f64 normal. Float normals agree across ports and devices to a few ulps, not bit for
 bit, because libm float functions differ. The host version of the f32 step takes its angle in
@@ -137,7 +142,7 @@ generator, with bounded draws at small and at rejecting ranges, normals, `at_*`,
 bit. Bounded fills are compared at ranges that reject often, rarely and never, against a
 reference of the contract above written on the C library's generators, and, where nothing
 rejects, against the sequential C bounded draws. Normal fills are compared with the host Box-Muller step on the C library's uniform fills, at
-every start slot, odd and even `n`, to 1e-12 (f64) and 4 ulps (f32), and with
+every start slot, odd and even `n`, to 1e-12 (f64) and 16 ulps + 1e-6 (f32, 4 ulps with `TANDEM_PRECISE_F32_NORMAL`), and with
 `tests/cross_fill_normal.h`. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
@@ -148,7 +153,7 @@ returned positions. `pixi.toml` provides a CUDA
 
 NVIDIA A100 40 GB (PCIe), CUDA 12.8, `make bench`: 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
-the run. Consecutive runs agreed within 1%, except the normal rows within 4%. The elements are
+the run. Consecutive runs agreed within 1%, except the normal rows within 6%. The elements are
 2^28 of each type, so the rows for narrow types write fewer bytes.
 
 | | GiB/s written |
@@ -167,14 +172,14 @@ the run. Consecutive runs agreed within 1%, except the normal rows within 4%. Th
 | `tandem::fill_bool` (one byte per bit) | 1227 |
 | `tandem::fill_u32_below(1000)` | 1336 |
 | `tandem::fill_u64_below(1000)` | 1348 |
-| `tandem::fill_normal_f64` | 742 |
-| `tandem::fill_normal_f64`, start at an odd Float64 draw | 611 |
-| `tandem::fill_normal_f32` | 709 |
+| `tandem::fill_normal_f64` | 765 |
+| `tandem::fill_normal_f64`, start at an odd Float64 draw | 590 |
+| `tandem::fill_normal_f32` | 1290 |
 | cuRAND Philox4x32-10 `curandGenerate` | 1332 |
 | cuRAND Philox4x32-10 `curandGenerateUniform` | 1307 |
 | cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 781 |
-| cuRAND Philox4x32-10 `curandGenerateNormal` | 956 |
-| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 583 |
+| cuRAND Philox4x32-10 `curandGenerateNormal` | 966 |
+| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 587 |
 
 The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
 as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.
@@ -183,8 +188,8 @@ cover one 128-byte line per step. Both kernels pick a 16-byte vector store at co
 when the output's blocks are 16-byte aligned. The bool fill expands each bit to a byte, so it
 stages one step of 32 groups (32 KiB) and writes 1024 contiguous bytes per group. The bounded
 fills run at the fill speed, because a rejection is rare and its retry runs out of line. The
-normal fills write both halves of each step and are limited by `log`, `sincospi` and `sqrt`, in double
-for `fill_normal_f64` and in float for `fill_normal_f32`.
+f32 normal fill is memory bound, the f64 one is limited by double-precision `log`, `sincospi`
+and `sqrt`.
 
 ## AI assistance
 
