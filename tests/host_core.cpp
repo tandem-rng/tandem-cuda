@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     bad += !(worst_ulp <= 8.0f);
     std::printf("block vs libm: f64 %.3g of r, f32 %.3g ulps of r\n", worst, (double)worst_ulp);
 
-    // The fixtures, regenerated from libm before this code existed.
+    // The fixtures come from this host code, printed to round trip, so they match exactly.
     tandem::Rng root(42, 0, 32);
     for (const auto &f : CROSS_NORMAL64) {
         tandem::Rng q = root;
@@ -125,7 +125,7 @@ int main(int argc, char **argv) {
         for (unsigned i = 0; i < f.n; i++) {
             auto pr = tandem::box_muller2(q.at_drand(2 * (i / 2)), q.at_drand(2 * (i / 2) + 1));
             double v = i % 2 ? pr.z1 : pr.z0;
-            bad += !(std::fabs(v - f.out[i]) <= 1e-12 * (1.0 + std::fabs(f.out[i])));
+            bad += v != f.out[i];
         }
     }
     for (const auto &f : CROSS_NORMAL32) {
@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
         for (unsigned i = 0; i < f.n; i++) {
             auto pr = tandem::box_muller2_f32(q.at_frand(2 * (i / 2)), q.at_frand(2 * (i / 2) + 1));
             float v = i % 2 ? pr.z1 : pr.z0;
-            bad += !(std::fabs(v - f.out[i]) <= 8 * 0x1p-23f * std::fabs(f.out[i]) + 1e-6f);
+            bad += v != f.out[i];
         }
     }
     // The bounded fill fixtures, with rejections keyed by the global draw index at nonzero

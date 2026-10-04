@@ -100,7 +100,8 @@ not round the f64 normal. Float normals agree across ports and devices to a few 
 bit, because libm float functions differ. The host version of the f32 step takes its angle in
 double and rounds the results, because a float angle `2 pi b` is off by up to `2 pi b 2^-24`
 where `sincospif` is not. The uniforms are exact, and everything else in this library is bit for
-bit. `tests/cross_fill_normal.h` holds normal fixtures for ports at even and odd starts.
+bit. `tests/cross_fill_normal.h` holds normal fixtures for ports at even and odd starts, from the
+host polynomial code: host builds match them exactly, devices to the tolerances above.
 
 **Bounded integers.** Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
 Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
