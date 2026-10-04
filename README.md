@@ -251,7 +251,7 @@ buffer. The elements are
 | `tandem::fill_u64_below(1000)` | 1348 |
 | `tandem::fill_u32_below(2^32 - 2)`, `fill_u64_below(2^64 - 2)` (rejects about every draw's threshold check) | 1348, 1351 |
 | `tandem::fill_u32_below` with a low bound into `int32_t` | 1348 |
-| `tandem::fill_u32_below` with a low bound into `int64_t` (8-byte elements) | 955 |
+| `tandem::fill_u32_below` with a low bound into `int64_t` (8-byte elements) | 1365 |
 | `tandem::fill_u64_below` with a low bound into `int64_t` | 1352 |
 | `tandem::fill_normal_f64` | 750 |
 | `tandem::fill_normal_f64`, start at an odd Float64 draw | 595 |
@@ -270,7 +270,9 @@ The direct kernel stores each block straight from registers, so the eight thread
 cover one 128-byte line per step. Both kernels pick a 16-byte vector store at compile time
 when the output's blocks are 16-byte aligned. The bool fill expands each bit to a byte, so it
 stages one step of 32 groups (32 KiB) and writes 1024 contiguous bytes per group. The bounded
-fills run at the fill speed, because a rejection is rare and its retry runs out of line. The
+fills run at the fill speed, because a rejection is rare and its retry runs out of line. A
+32-bit range into 8-byte elements gives each thread one 16-byte output slot from two draws, so a
+warp still writes 512 contiguous bytes. Two stores per 16-byte block of draws gave 955 GiB/s. The
 f32 normal fill is memory bound, the f64 one is limited by double-precision `log`, `sincospi`
 and `sqrt`.
 

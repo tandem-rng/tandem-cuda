@@ -241,6 +241,40 @@ __global__ void fill_rows_kernel(uint32_t key0, uint32_t key1, uint32_t key2, ui
     }
 }
 
+/* The write phase of the tile kernel for outputs twice as wide as their draws (32-bit bounded
+ * draws into 8-byte elements). Consecutive threads take consecutive 16-byte output slots, two
+ * draws each, so a warp stores 512 contiguous bytes per instruction. Per stream block, two
+ * 16-byte stores 32 bytes apart left every sector half written by each instruction. */
+template <class E>
+__device__ __forceinline__ void store_tile_widened(const uint4 *tile, unsigned slots, uint64_t gb,
+                                                   uint32_t K, uint32_t jb, uint64_t b0,
+                                                   uint64_t b1, const Ctx &x,
+                                                   typename elem<E>::out_t *out) {
+    using out_t = typename elem<E>::out_t;
+    constexpr unsigned size = elem<E>::bits / 8, per_tile_group = TILE_STEPS * 8;
+    const uint2 *half = reinterpret_cast<const uint2 *>(tile);
+    for (unsigned s = threadIdx.x; s < 2 * slots; s += THREADS) {
+        unsigned sg = s / (2 * per_tile_group), within = s % (2 * per_tile_group);
+        uint64_t first = ((gb + sg) * K + jb) * 128u + within * 8u; /* stream byte of the pair */
+        if (first >= b1) continue;
+        uint2 v = half[s];
+        uint32_t w[4] = {v.x, v.y, 0u, 0u};
+        alignas(16) out_t o[2] = {elem<E>::make(w, 0, first / size, x),
+                                  elem<E>::make(w, 1, first / size + 1, x)};
+        if (first >= b0 && first + 2 * size <= b1) {
+            out_t *dst = out + (first - b0) / size;
+            if ((reinterpret_cast<uintptr_t>(dst) & 15u) == 0) {
+                *reinterpret_cast<uint4 *>(dst) = *reinterpret_cast<const uint4 *>(o);
+                continue;
+            }
+        }
+        for (unsigned i = 0; i < 2; i++) {
+            uint64_t at = first + i * size;
+            if (at >= b0 && at + size <= b1) out[(at - b0) / size] = o[i];
+        }
+    }
+}
+
 /* One thread per chunk, 32 groups per block, output staged through shared memory. Every
  * TILE_STEPS steps the block holds, for each of its groups, TILE_STEPS consecutive rows,
  * which are 1024 contiguous bytes of the stream. The write phase hands consecutive 16-byte
@@ -270,14 +304,17 @@ __global__ void __launch_bounds__(THREADS)
             }
         }
         __syncthreads();
-        for (unsigned s = threadIdx.x; s < SLOTS; s += THREADS) {
-            unsigned sg = s / (TILE_STEPS * 8), within = s % (TILE_STEPS * 8);
-            uint64_t first = ((gb + sg) * K + jb) * 128u + within * 16u;
-            if (first >= b1) continue;
-            uint4 v = tile[s];
-            uint32_t w[4] = {v.x, v.y, v.z, v.w};
-            store_block<E, ALIGNED>(out, b0, b1, first, w, x);
-        }
+        if constexpr (sizeof(typename elem<E>::out_t) == 2 * elem<E>::bits / 8)
+            store_tile_widened<E>(tile, SLOTS, gb, K, jb, b0, b1, x, out);
+        else
+            for (unsigned s = threadIdx.x; s < SLOTS; s += THREADS) {
+                unsigned sg = s / (TILE_STEPS * 8), within = s % (TILE_STEPS * 8);
+                uint64_t first = ((gb + sg) * K + jb) * 128u + within * 16u;
+                if (first >= b1) continue;
+                uint4 v = tile[s];
+                uint32_t w[4] = {v.x, v.y, v.z, v.w};
+                store_block<E, ALIGNED>(out, b0, b1, first, w, x);
+            }
         __syncthreads();
     }
 }
