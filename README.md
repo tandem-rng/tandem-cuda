@@ -73,16 +73,17 @@ same position. The fill starts at `pos` aligned up to 64 bits and consumes `2 ce
 draws, so an odd `n` uses the cos half of its last pair and still advances past both draws. An empty
 normal or bounded fill consumes nothing and returns `pos` unchanged, even when `pos` is unaligned. A
 start at an odd Float64 draw makes every pair span two blocks, and the kernel steps a second
-chunk per thread to read them, at about 80% of the speed. On a device the angle goes through
-`sincospi(2b)`, on a host through `cos` and `sin`, and `log` differs in the last bits, so f64
-normals agree across platforms to about 1e-15 relative, not bit for bit.
+chunk per thread to read them, at about 80% of the speed. Devices and hosts run the same
+polynomial step below, so f64 normals agree bit for bit on every platform, and with tandem-c.
 
-On a host, `box_muller2` and `box_muller2_f32` in `core.hpp` do not call libm. They are the
-polynomial form of tandem-c: the logarithm from the exponent bits and a short series, and the
+`box_muller2` in `core.hpp`, on a device and on a host, and `box_muller2_f32` on a host do not
+call libm. They are the polynomial form of tandem-c: the logarithm from the exponent bits and a short series, and the
 sine and cosine from an exact quarter-turn reduction and polynomials, at most 9.9e-16 relative in
 f64 and 3.3 ulps in f32 against libm. Every multiply-add is an explicit `std::fma` and contraction
 is off, as in tandem-c, so every host compiler and target gives the C library's bits, and a scalar
-`normal2()` equals a pair of a fill. `tandem::normal_block_f64` and `normal_block_f32` turn arrays
+`normal2()` equals a pair of a fill. The f64 step `tandem::normal_pair_f64` is inlined into the
+device kernels too: no plain product feeds a plain sum except an exact one, so device contraction
+cannot change the bits. It took the A100 f64 fill from 706 GiB/s with `log` and `sincospi` to 833. `tandem::normal_block_f64` and `normal_block_f32` turn arrays
 of uniforms into normals for host fills, and clang vectorizes them on Arm and on x86 without
 `-ffast-math` (`make hostvec` checks it). x86 needs `-mfma` (the Makefile passes `-mavx2 -mfma`),
 because without it `std::fma` is a slow library call that gives the same bits.
@@ -193,14 +194,15 @@ through the public launchers), and compares device fills at random keys,
 chunk lengths, positions, lengths and output alignments with the reference C implementation
 compiled into the test (a checkout at `TANDEM_C`). One mixed sequence of draws on a device
 generator, with bounded draws at small and at rejecting ranges, normals, `at_*`, `fork`,
-`split` and `sub`, is compared with the C library, normals to 1e-12 and the rest bit for
+`split` and `sub`, is compared with the C library, f32 normals to 4 ulps and the rest bit for
 bit. Bounded fills are compared at ranges that reject often, rarely and never, against a
 reference of the contract above written on the C library's generators, and, where nothing
 rejects, against the sequential C bounded draws. The C library's bounded fills must equal that
 reference too. A bounded fill cut at a random element, at ranges that reject about half the draws,
 equals the whole fill for both widths, the fused low-bound and wider outputs and the generator. Normal fills are compared with the host Box-Muller step on the C library's uniform fills, at
-every start slot, odd and even `n`, to 1e-12 (f64) and 16 ulps + 1e-6 (f32, 4 ulps with `TANDEM_PRECISE_F32_NORMAL`), and with
-`tests/cross_fill_normal.h`. A generator is checked by running mixed fills of every width through it and through the C
+every start slot, odd and even `n`, bit for bit (f64) and to 16 ulps + 1e-6 (f32, 4 ulps with
+`TANDEM_PRECISE_F32_NORMAL`), and with `tests/cross_fill_normal.h` and tandem-c's
+`tests/cross_normal.h`, f64 bit for bit. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `tests/host_core.cpp` (`make host`) builds `core.hpp` as C++17 with clang and
@@ -254,8 +256,8 @@ buffer. The elements are
 | `tandem::fill_u32_below` with a low bound into `int32_t` | 1348 |
 | `tandem::fill_u32_below` with a low bound into `int64_t` (8-byte elements) | 1365 |
 | `tandem::fill_u64_below` with a low bound into `int64_t` | 1352 |
-| `tandem::fill_normal_f64` | 750 |
-| `tandem::fill_normal_f64`, start at an odd Float64 draw | 595 |
+| `tandem::fill_normal_f64` | 833 |
+| `tandem::fill_normal_f64`, start at an odd Float64 draw | 679 |
 | `tandem::fill_normal_f32` | 1290 |
 | `thrust::transform` of `tandem::uniform<uint32_t>` into a device vector | 65 |
 | `thrust::transform` of `tandem::uniform<double>` into a device vector | 125 |
@@ -274,8 +276,8 @@ stages one step of 32 groups (32 KiB) and writes 1024 contiguous bytes per group
 fills run at the fill speed, because a rejection is rare and its retry runs out of line. A
 32-bit range into 8-byte elements gives each thread one 16-byte output slot from two draws, so a
 warp still writes 512 contiguous bytes. Two stores per 16-byte block of draws gave 955 GiB/s. The
-f32 normal fill is memory bound, the f64 one is limited by double-precision `log`, `sincospi`
-and `sqrt`.
+f32 normal fill is memory bound. The f64 one is compute bound on its double-precision step, a
+division, a square root and three polynomials per pair.
 
 ## AI assistance
 

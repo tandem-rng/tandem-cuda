@@ -32,7 +32,7 @@ build: tests/test_cuda tests/test_thrust tools/bench
 tandem_c.o: $(TANDEM_C)/tandem.c $(TANDEM_C)/tandem.h
 	$(CC) -std=c99 -O2 -ffp-contract=off $(FMAFLAGS) -c -o $@ $<
 
-tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(HEADERS) tandem_c.o
+tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(TANDEM_C)/tests/cross_normal.h $(HEADERS) tandem_c.o
 	$(NVCC) $(NVCCFLAGS) -Iinclude -I$(TANDEM_C) -o $@ tests/test_cuda.cu tandem_c.o $(LINK)
 
 tests/test_thrust: tests/test_thrust.cu tandem_thrust.cuh $(HEADERS)
@@ -55,7 +55,7 @@ bench: tools/bench
 # conda environment's by default. Only the tests are built, with the same sources as nvcc.
 CUDA_PATH ?= $(CONDA_PREFIX)
 CLANGCUDA_STD ?= c++20
-tests/test_clangcuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(HEADERS) tandem_c.o
+tests/test_clangcuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(TANDEM_C)/tests/cross_normal.h $(HEADERS) tandem_c.o
 	$(HOSTCXX) --cuda-path=$(CUDA_PATH) -Wno-unknown-cuda-version -isystem $(CUDA_PATH)/targets/x86_64-linux/include \
 	  --cuda-gpu-arch=sm_80 -std=$(CLANGCUDA_STD) -O3 -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ \
 	  -x cuda tests/test_cuda.cu -x none tandem_c.o -L$(CUDA_PATH)/lib -L$(CUDA_PATH)/targets/x86_64-linux/lib \

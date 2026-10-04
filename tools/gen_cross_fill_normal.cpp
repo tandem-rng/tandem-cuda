@@ -1,6 +1,6 @@
 // Writes tests/cross_fill_normal.h: normal fills from the key of seed 42, K = 32, from the host
 // Box-Muller of core.hpp, which equals tandem-c's bit for bit. Ports with that polynomial code
-// match exactly, devices to a few ulps. Pair j of a fill is one Box-Muller step of uniform draws 2j and 2j + 1 of
+// match exactly. Device f32 fills use the device's sincos and match to a few ulps. Pair j of a fill is one Box-Muller step of uniform draws 2j and 2j + 1 of
 // the Float64 (Float32) fill, cos half first, so element 2j is the cos half and 2j + 1 the sin
 // half. An odd n drops the last sin half. Run: make cross
 #include <cstdio>
@@ -34,7 +34,8 @@ int main() {
                 "// up to 64 bits (f64) or 32 bits (f32). Element 2j is the cos half and 2j + 1 the sin half of\n"
                 "// the Box-Muller step of uniform draws 2j and 2j + 1. An odd n drops the last sin half and\n"
                 "// still consumes both draws. From the host polynomial Box-Muller of core.hpp and tandem-c:\n"
-                "// host builds match exactly, device builds to 1e-12 relative (f64), 16 ulps + 1e-6 (f32).\n"
+                "// f64 matches exactly on hosts and devices, f32 exactly on hosts and to 16 ulps + 1e-6 on\n"
+                "// devices.\n"
                 "#pragma once\n#include <stdint.h>\n\n");
     std::printf("typedef struct { uint64_t pos; unsigned n; double out[64]; } cross_normal64;\n"
                 "static const cross_normal64 CROSS_NORMAL64[] = {\n");

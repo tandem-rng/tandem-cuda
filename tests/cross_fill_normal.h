@@ -3,7 +3,8 @@
 // up to 64 bits (f64) or 32 bits (f32). Element 2j is the cos half and 2j + 1 the sin half of
 // the Box-Muller step of uniform draws 2j and 2j + 1. An odd n drops the last sin half and
 // still consumes both draws. From the host polynomial Box-Muller of core.hpp and tandem-c:
-// host builds match exactly, device builds to 1e-12 relative (f64), 16 ulps + 1e-6 (f32).
+// f64 matches exactly on hosts and devices, f32 exactly on hosts and to 16 ulps + 1e-6 on
+// devices.
 #pragma once
 #include <stdint.h>
 

@@ -11,6 +11,7 @@
 #include "vectors.h"
 #include "cross_fill_below.h"
 #include "cross_fill_normal.h"
+#include "tests/cross_normal.h" // tandem-c's, through -I$(TANDEM_C)
 
 extern "C" {
 #include "tandem.h"
@@ -374,15 +375,14 @@ static void check_device_api(const uint32_t key[4], uint64_t pos, uint32_t K, ui
         bad += g.below32[i] != tandem_u32_below(&c, range32);
         bad += g.below64[i] != tandem_u64_below(&c, range64);
         double z = tandem_normal_f64(&c);
-        bad += !(std::fabs(g.normal[i] - z) <= 1e-12 * (1.0 + std::fabs(z)));
+        bad += g.normal[i] != z; // f64 normals are the same polynomial code on both sides
         float fa = tandem_next_f32(&c), fb = tandem_next_f32(&c);
         float zf = sqrtf(-2.0f * logf(1.0f - fa)) * cosf(2.0f * 3.14159265358979323846f * fb);
         bad += !(std::fabs(g.normalf[i] - zf) <= 4 * 0x1p-23f * (1.0f + std::fabs(zf)));
         {
             double da = tandem_next_f64(&c), db = tandem_next_f64(&c); // argument order is unspecified
             auto p2 = tandem::box_muller2(da, db);
-            bad += !(std::fabs(g.pair[2 * i] - p2.z0) <= 1e-12 * (1.0 + std::fabs(p2.z0)));
-            bad += !(std::fabs(g.pair[2 * i + 1] - p2.z1) <= 1e-12 * (1.0 + std::fabs(p2.z1)));
+            bad += g.pair[2 * i] != p2.z0 || g.pair[2 * i + 1] != p2.z1;
             float qa = tandem_next_f32(&c), qb = tandem_next_f32(&c);
             auto pf = tandem::box_muller2_f32(qa, qb);
             bad += !(std::fabs(g.pairf[2 * i] - pf.z0) <= 4 * 0x1p-23f * (1.0f + std::fabs(pf.z0)));
@@ -730,15 +730,28 @@ static void check_cross_normal(const F &f, double tol) {
 
 static void test_cross_normal() {
     for (const auto &f : CROSS_NORMAL64)
-        check_cross_normal<double, cross_normal64, tandem::fill_normal_f64>(f, 1e-12);
+        check_cross_normal<double, cross_normal64, tandem::fill_normal_f64>(f, 0.0); // exact
     for (const auto &f : CROSS_NORMAL32)
         check_cross_normal<float, cross_normal32, tandem::fill_normal_f32>(f, 4 * 0x1p-23);
+    // tandem-c's fixture: normal2 calls of Rng(42) after one bit draw, which is the fill from
+    // position 1. f64 equals it bit for bit, f32 to the device fill's 16 ulps + 1e-6.
+    const size_t n = 2 * CROSS_NORMAL_COUNT;
+    dev<double> d(n);
+    CHECK(tandem::fill_normal_f64(CROSS_FILL_KEY, 1, 32, d.p, n) == CROSS_NORMAL_END_POS);
+    dev<float> df(n);
+    CHECK(tandem::fill_normal_f32(CROSS_FILL_KEY, 1, 32, df.p, n) == CROSS_NORMALF_END_POS);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CHECK(std::memcmp(d.host().data(), CROSS_NORMAL, sizeof CROSS_NORMAL) == 0);
+    std::vector<float> got = df.host();
+    for (size_t i = 0; i < n; i++)
+        CHECK(std::fabs(got[i] - CROSS_NORMALF[i]) <= 16 * 0x1p-23f * std::fabs(CROSS_NORMALF[i]) + 1e-6f);
 }
 
 // Normal fills: pair j is one Box-Muller step of the uniform draws 2j and 2j + 1, cos half first,
 // and an odd n drops the last sin half but still consumes both draws. The reference runs the host
 // step on the C library's uniform fills, at every start slot, including starts at an odd draw
-// where each pair spans two blocks. Device sincospi and log differ from the host by a few ulp.
+// where each pair spans two blocks. f64 runs the host's polynomial step and must match exactly,
+// f32 uses the device's sincos and logf and matches to 16 ulps + 1e-6.
 template <class T, void (*cfill)(tandem_rng *, T *, size_t), unsigned W,
           tandem::Pair2<T> (*step)(T, T),
           uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
@@ -795,7 +808,7 @@ static void check_normal(std::mt19937_64 &gen, const char *label, double tol) {
 static void test_normal() {
     std::mt19937_64 gen(8675);
     check_normal<double, tandem_fill_f64, 64, tandem::box_muller2, tandem::fill_normal_f64>(
-        gen, "f64", 1e-12);
+        gen, "f64", 0.0);
     check_normal<float, tandem_fill_f32, 32, tandem::box_muller2_f32, tandem::fill_normal_f32>(
         gen, "f32", 4 * 0x1p-23);
 }
@@ -859,7 +872,7 @@ static void test_generator() {
     CHECK(std::memcmp(hz.data(), wz.data(), 21 * 8) == 0);
     CHECK(std::memcmp(h8.data() + 64, w16.data(), 22) == 0);
     for (size_t i = 0; i < 77; i++)
-        CHECK(std::fabs(hz[100 + i] - wz[100 + i]) <= 1e-12 * (1.0 + std::fabs(wz[100 + i])));
+        CHECK(hz[100 + i] == wz[100 + i]);
     CHECK(g.pos == tandem_position(&c));
     CHECK(g.K == 16);
 

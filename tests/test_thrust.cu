@@ -120,7 +120,7 @@ static void test_against_fills() {
         // Normals: iterator element 2j, 2j + 1 are the pair of uniforms 2j, 2j + 1.
         auto fn64 = [&](double *p, size_t m) { tandem::fill_normal_f64(key, pos, K, p, m); };
         auto fn32 = [&](float *p, size_t m) { tandem::fill_normal_f32(key, pos, K, p, m); };
-        CHECK(close(transformed<tandem::normal<double>, double>(tandem::normal<double>(key, K, pos), n), filled<double>(fn64, n), 1e-12));
+        CHECK(close(transformed<tandem::normal<double>, double>(tandem::normal<double>(key, K, pos), n), filled<double>(fn64, n), 0.0));
         CHECK(close(transformed<tandem::normal<float>, float>(tandem::normal<float>(key, K, pos), n), filled<float>(fn32, n), 16 * 0x1p-23));
     }
 }

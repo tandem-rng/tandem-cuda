@@ -340,7 +340,8 @@ template <class T> struct Pair2 {
  * Contraction is off in the loops and every multiply-add is an explicit fused one, so every
  * compiler and target, the vector body and the scalar remainder do the same arithmetic. One
  * out-of-line body per precision keeps the scalar draws and the fills bit identical. */
-#if defined(__clang__)
+/* Device passes skip it: nvcc does not know it, and the f64 step cannot contract anyway. */
+#if defined(__clang__) && !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 #define TANDEM_FP_NOCONTRACT _Pragma("clang fp contract(off)")
 #else
 #define TANDEM_FP_NOCONTRACT
@@ -353,6 +354,18 @@ template <class T> struct Pair2 {
 #define TANDEM_NOINLINE_NOFMA
 #endif
 
+/* The f64 Box-Muller step is inlined into the host loop, which must vectorize, and into device
+ * kernels. GCC inlines it despite the loop's own optimize attribute only when forced. */
+#if defined(KOKKOS_VERSION)
+#define TANDEM_FORCE_INLINE KOKKOS_FORCEINLINE_FUNCTION
+#elif defined(__CUDACC__) || defined(__HIPCC__)
+#define TANDEM_FORCE_INLINE __host__ __device__ __forceinline__
+#elif defined(__GNUC__) || defined(__clang__)
+#define TANDEM_FORCE_INLINE __attribute__((always_inline)) inline
+#else
+#define TANDEM_FORCE_INLINE inline
+#endif
+
 namespace detail {
 /* IEEE sqrt that never sets errno, so that a loop around it vectorizes without -fno-math-errno
  * (glibc's sqrt is otherwise a library call). The argument here is never negative. */
@@ -360,69 +373,86 @@ namespace detail {
 inline double sqrt_(double x) { return __builtin_elementwise_sqrt(x); }
 inline float sqrt_(float x) { return __builtin_elementwise_sqrt(x); }
 #else
-inline double sqrt_(double x) { return std::sqrt(x); }
-inline float sqrt_(float x) { return std::sqrt(x); }
+TANDEM_FN double sqrt_(double x) { return std::sqrt(x); }
+TANDEM_FN float sqrt_(float x) { return std::sqrt(x); }
 #endif
 /* Every multiply-add of the normal loops is an explicit fused multiply-add, so that every
  * compiler and target gives the same bits, as in tandem-c. Without a fused instruction std::fma
  * is a correct but slow library call that cannot vectorize: build with -mfma on x86. */
-inline double fmad(double x, double y, double z) { return std::fma(x, y, z); }
+TANDEM_FN double fmad(double x, double y, double z) { return std::fma(x, y, z); }
 inline float fmaf_(float x, float y, float z) { return std::fma(x, y, z); }
+
+TANDEM_FN uint64_t f64_bits(double x) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return (uint64_t)__double_as_longlong(x);
+#else
+    uint64_t b;
+    std::memcpy(&b, &x, 8);
+    return b;
+#endif
+}
+TANDEM_FN double f64_from_bits(uint64_t b) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return __longlong_as_double((long long)b);
+#else
+    double x;
+    std::memcpy(&x, &b, 8);
+    return x;
+#endif
+}
 } // namespace detail
+
+/* One f64 Box-Muller step, cos half first, on the host and on a device. Every multiply-add is an
+ * explicit fma, and no plain product feeds a plain sum except b * 4 + 0.5, whose product is exact,
+ * so contraction cannot change the bits and a device gives the host's values. */
+TANDEM_FORCE_INLINE Pair2<double> normal_pair_f64(double a, double b) {
+    TANDEM_FP_NOCONTRACT
+    using detail::fmad;
+    /* 1 - a = mant 2^k with mant in [sqrt(1/2), sqrt(2)) from the bits: shifting the exponent
+     * field by the bits of sqrt(1/2) makes the mantissa rollover pick k. */
+    uint64_t ix = detail::f64_bits(1.0 - a) + 0x00095f6200000000u;
+    double nk = (double)(1023 - (int32_t)(ix >> 52)); /* -k, 32-bit so that x86 vectorizes it */
+    double mant = detail::f64_from_bits((ix & 0x000fffffffffffffu) + 0x3fe6a09e00000000u);
+    double s = (mant - 1.0) / (mant + 1.0), zz = s * s;
+    double p = fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, 0.08312363319426472,
+               0.09070001083303751), 0.11111433317907482), 0.14285712049336274),
+               0.2000000000566491), 0.33333333333331017), 1.0);
+    /* -2 ln(1 - a) = 2 nk ln 2 - 4 s p, with ln 2 split so that nk * ln2_hi is exact. */
+    double r = detail::sqrt_(fmad(nk, 3.816429394731813e-10, fmad(nk, 1.3862943607382476, (s * -4.0) * p)));
+
+    /* Nearest quarter turn q, and the angle left over in [-pi/4, pi/4]. */
+    int64_t q = (int32_t)(b * 4.0 + 0.5); /* in [0, 4], 32-bit conversion for x86 vectors */
+    double f = fmad(-(double)(int32_t)q, 0.25, b), th = f * 6.283185307179586, w = th * th;
+    double hs = fmad(w, fmad(w, fmad(w, fmad(w, fmad(w, 1.5914650986900946e-10,
+                -2.5051097984389413e-08), 2.755731600073921e-06), -0.00019841269836630226),
+                0.008333333333330813), -0.16666666666666669);
+    double hc = fmad(w, fmad(w, fmad(w, fmad(w, fmad(w, 2.0665708703855164e-09,
+                -2.7555858522576447e-07), 2.480158263811954e-05), -0.0013888888882156126),
+                0.04166666666663108), -0.4999999999999997);
+    double sn = th * fmad(w, hs, 1.0), cs = fmad(w, hc, 1.0);
+
+    /* Rotate by q quarter turns with bit operations: odd q swaps the two, bit 1 of q negates
+     * the sine, and bit 1 of q + 1 negates the cosine. */
+    uint64_t qu = (uint64_t)q, sm = (uint64_t)0 - (qu & 1u);
+    uint64_t sb = detail::f64_bits(sn), cb = detail::f64_bits(cs);
+    uint64_t xb = (sb & sm) | (cb & ~sm), yb = (cb & sm) | (sb & ~sm);
+    xb ^= ((qu + 1u) << 62) & 0x8000000000000000u;
+    yb ^= (qu << 62) & 0x8000000000000000u;
+    return Pair2<double>{r * detail::f64_from_bits(xb), r * detail::f64_from_bits(yb)};
+}
 
 /* m pairs of uniforms u[2j], u[2j + 1] in [0, 1) to normals z[2j] (cos half), z[2j + 1] (sin
  * half). The arrays must not overlap. Host only. */
 TANDEM_NOINLINE_NOFMA inline void normal_block_f64(const double *__restrict u,
                                                    double *__restrict z, size_t m) {
     TANDEM_FP_NOCONTRACT
-    using detail::fmad;
 #if defined(__clang__)
 #pragma clang loop interleave_count(8)
 #endif
     for (size_t j = 0; j < m; j++) {
-        double a = u[2u * j], b = u[2u * j + 1u];
-
-        /* 1 - a = mant 2^k with mant in [sqrt(1/2), sqrt(2)) from the bits: shifting the
-         * exponent field by the bits of sqrt(1/2) makes the mantissa rollover pick k. */
-        double x = 1.0 - a, mant;
-        uint64_t bits, ix;
-        std::memcpy(&bits, &x, 8);
-        ix = bits + 0x00095f6200000000u;
-        double nk = (double)(1023 - (int32_t)(ix >> 52)); /* -k, 32-bit so that x86 vectorizes it */
-        ix = (ix & 0x000fffffffffffffu) + 0x3fe6a09e00000000u;
-        std::memcpy(&mant, &ix, 8);
-        double s = (mant - 1.0) / (mant + 1.0), zz = s * s;
-        double p = fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, 0.08312363319426472,
-                   0.09070001083303751), 0.11111433317907482), 0.14285712049336274),
-                   0.2000000000566491), 0.33333333333331017), 1.0);
-        /* -2 ln(1 - a) = 2 nk ln 2 - 4 s p, with ln 2 split so that nk * ln2_hi is exact. */
-        double r = detail::sqrt_(fmad(nk, 3.816429394731813e-10, fmad(nk, 1.3862943607382476, (s * -4.0) * p)));
-
-        /* Nearest quarter turn q, and the angle left over in [-pi/4, pi/4]. */
-        int64_t q = (int32_t)(b * 4.0 + 0.5); /* in [0, 4], 32-bit conversion for x86 vectors */
-        double f = fmad(-(double)(int32_t)q, 0.25, b), th = f * 6.283185307179586, w = th * th;
-        double hs = fmad(w, fmad(w, fmad(w, fmad(w, fmad(w, 1.5914650986900946e-10,
-                    -2.5051097984389413e-08), 2.755731600073921e-06), -0.00019841269836630226),
-                    0.008333333333330813), -0.16666666666666669);
-        double hc = fmad(w, fmad(w, fmad(w, fmad(w, fmad(w, 2.0665708703855164e-09,
-                    -2.7555858522576447e-07), 2.480158263811954e-05), -0.0013888888882156126),
-                    0.04166666666663108), -0.4999999999999997);
-        double sn = th * fmad(w, hs, 1.0), cs = fmad(w, hc, 1.0);
-
-        /* Rotate by q quarter turns with bit operations: odd q swaps the two, bit 1 of q
-         * negates the sine, and bit 1 of q + 1 negates the cosine. */
-        uint64_t qu = (uint64_t)q, sm = (uint64_t)0 - (qu & 1u), sb, cb, xb, yb;
-        std::memcpy(&sb, &sn, 8);
-        std::memcpy(&cb, &cs, 8);
-        xb = (sb & sm) | (cb & ~sm);
-        yb = (cb & sm) | (sb & ~sm);
-        xb ^= ((qu + 1u) << 62) & 0x8000000000000000u;
-        yb ^= (qu << 62) & 0x8000000000000000u;
-        double cx, sx;
-        std::memcpy(&cx, &xb, 8);
-        std::memcpy(&sx, &yb, 8);
-        z[2u * j] = r * cx;
-        z[2u * j + 1u] = r * sx;
+        Pair2<double> p = normal_pair_f64(u[2u * j], u[2u * j + 1u]);
+        z[2u * j] = p.z0;
+        z[2u * j + 1u] = p.z1;
     }
 }
 
@@ -472,14 +502,11 @@ TANDEM_NOINLINE_NOFMA inline void normal_block_f32(const float *__restrict u,
 }
 
 /* Both halves of one Box-Muller step: z0 = r cos(2 pi b), z1 = r sin(2 pi b), with
- * r = sqrt(-2 log(1 - a)). On a device the angle goes through the precise sincospi(2 b) and
- * the log is the device's, on a host it is normal_block_f64 on one pair, the same arithmetic as
- * a host fill, so devices and hosts agree to a few ulps and hosts agree bit for bit. */
+ * r = sqrt(-2 log(1 - a)). The polynomial step above, on a device as on a host, so f64 normals
+ * agree bit for bit everywhere, with tandem-c too. */
 TANDEM_FN Pair2<double> box_muller2(double a, double b) {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    double r = std::sqrt(-2.0 * std::log(1.0 - a)), s, c;
-    sincospi(2.0 * b, &s, &c);
-    return Pair2<double>{r * c, r * s};
+    return normal_pair_f64(a, b);
 #else
     double u[2] = {a, b}, z[2];
     normal_block_f64(u, z, 1);
@@ -501,13 +528,7 @@ TANDEM_FN Pair2<float> box_muller2_f32(float a, float b) {
 }
 
 /* The cos half alone: Box-Muller from two draws a and b in [0, 1), u = 1 - a in (0, 1]. */
-TANDEM_FN double box_muller(double a, double b) {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    return std::sqrt(-2.0 * std::log(1.0 - a)) * std::cos(6.283185307179586 * b);
-#else
-    return box_muller2(a, b).z0;
-#endif
-}
+TANDEM_FN double box_muller(double a, double b) { return box_muller2(a, b).z0; }
 TANDEM_FN float box_muller_f32(float a, float b) {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return std::sqrt(-2.0f * std::log(1.0f - a)) * std::cos(2.0f * 3.14159265358979323846f * b);
