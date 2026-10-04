@@ -1,5 +1,6 @@
 // Spec vectors, the Julia stream dumps, and agreement with the C library at random keys and
 // positions. Run on a GPU host: make test
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -303,6 +304,98 @@ static void test_against_c() {
     CHECK(r.pos == tandem_position(&c));
 }
 
+// ---- Device generator beyond the scalar draws ---------------------------------------------------
+
+constexpr size_t API_N = 600, API_AT = 24, API_CHILD = 5;
+
+struct ApiOut {
+    uint32_t below32[API_N];
+    uint64_t below64[API_N];
+    double normal[API_N];
+    uint8_t u8[API_N];
+    uint16_t u16[API_N], f16[API_N];
+    uint32_t at32[API_AT];
+    uint64_t at64[API_AT];
+    float atf32[API_AT];
+    double atf64[API_AT];
+    uint64_t fork[API_CHILD], split, sub, pos;
+};
+
+__global__ void api_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, uint64_t pos,
+                           uint32_t K, uint32_t range32, uint64_t range64, ApiOut *o) {
+    const uint32_t key[4] = {k0, k1, k2, k3};
+    tandem::device_rng r = tandem::device_rng::from_key(key, pos, K);
+    for (size_t i = 0; i < API_N; i++) {
+        o->below32[i] = r.urand(range32);
+        o->below64[i] = r.urand64(range64);
+        o->normal[i] = r.normal();
+        o->u8[i] = r.next_u8();
+        o->u16[i] = r.next_u16();
+        o->f16[i] = r.next_f16_bits();
+    }
+    for (size_t i = 0; i < API_AT; i++) {
+        o->at32[i] = r.at_urand(i);
+        o->at64[i] = r.at_urand64(i);
+        o->atf32[i] = r.at_frand(i);
+        o->atf64[i] = r.at_drand(i);
+    }
+    tandem::device_rng kids[API_CHILD];
+    r.fork(kids, API_CHILD);
+    for (size_t i = 0; i < API_CHILD; i++) o->fork[i] = kids[i].next_u64();
+    o->split = r.split(3).next_u64();
+    o->sub = r.sub(9).next_u64();
+    o->pos = r.pos;
+}
+
+// The device generator matches the C library on every draw it shares, in one mixed sequence.
+// Normals agree to libm precision, everything else bit for bit.
+static void check_device_api(const uint32_t key[4], uint64_t pos, uint32_t K, uint32_t range32,
+                             uint64_t range64) {
+    ApiOut *d;
+    CUDA_CHECK(cudaMalloc(&d, sizeof(ApiOut)));
+    api_kernel<<<1, 1>>>(key[0], key[1], key[2], key[3], pos, K, range32, range64, d);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    ApiOut g;
+    CUDA_CHECK(cudaMemcpy(&g, d, sizeof g, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d));
+
+    tandem_rng c = tandem_from_key(key, pos, K);
+    int bad = 0;
+    for (size_t i = 0; i < API_N; i++) {
+        bad += g.below32[i] != tandem_u32_below(&c, range32);
+        bad += g.below64[i] != tandem_u64_below(&c, range64);
+        double z = tandem_normal_f64(&c);
+        bad += !(std::fabs(g.normal[i] - z) <= 1e-12 * (1.0 + std::fabs(z)));
+        bad += g.u8[i] != tandem_next_u8(&c);
+        bad += g.u16[i] != tandem_next_u16(&c);
+        bad += g.f16[i] != tandem_next_f16_bits(&c);
+    }
+    for (size_t i = 0; i < API_AT; i++) {
+        bad += g.at32[i] != tandem_at_u32(&c, i);
+        bad += g.at64[i] != tandem_at_u64(&c, i);
+        bad += g.atf32[i] != tandem_at_f32(&c, i);
+        bad += g.atf64[i] != tandem_at_f64(&c, i);
+    }
+    tandem_rng kids[API_CHILD];
+    tandem_fork(&c, kids, API_CHILD);
+    for (size_t i = 0; i < API_CHILD; i++) bad += g.fork[i] != tandem_next_u64(&kids[i]);
+    tandem_rng sp = tandem_split(&c, 3), sb = tandem_sub(&c, 9);
+    bad += g.split != tandem_next_u64(&sp);
+    bad += g.sub != tandem_next_u64(&sb);
+    bad += g.pos != tandem_position(&c);
+    if (bad) std::printf("FAIL device_rng vs C: %d differences (K=%u pos=%llu range=%u)\n", bad, K,
+                         (unsigned long long)pos, range32);
+    failures += bad != 0;
+}
+
+static void test_device_api() {
+    const uint32_t key[4] = {11, 22, 33, 44};
+    // A small range rarely rejects, a range above 2^31 rejects often and exercises the loop.
+    check_device_api(key, 0, 32, 7u, 1000003u);
+    check_device_api(key, 77, 8, 3000000000u, 0xc000000000003039ull);
+    check_device_api(key, 4097, 1, 0x80000001u, 0x8000000000000001ull);
+}
+
 // A signed fill is the unsigned fill of the same width read in two's complement, and it returns
 // the same position.
 template <class S, class U, uint64_t (*sfill)(const uint32_t *, uint64_t, uint32_t, S *, size_t, cudaStream_t),
@@ -342,6 +435,7 @@ int main(int argc, char **argv) {
     test_dumps(dir);
     test_against_c();
     test_signed();
+    test_device_api();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

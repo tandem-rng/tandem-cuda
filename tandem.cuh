@@ -25,21 +25,14 @@ namespace tandem {
 
 /* ---- Per-thread generator ---------------------------------------------------------------- */
 
-/* The transport form with public fields plus one cached chunk state. About 20 registers.
- * tandem::Rng has the same law and state behind accessors. */
-struct device_rng {
-    uint32_t key[4];
-    uint64_t pos;
-    uint32_t K;
-    ChunkCache cache;
-
+/* tandem::Rng with the state in public fields: key, pos and K are the transport form, plus
+ * one cached chunk state, about 20 registers. The draw API (bounded draws, normals, at_*,
+ * split, sub, fork) is Rng's, from Draws<device_rng>. */
+struct device_rng : GenState, Draws<device_rng> {
     __host__ __device__ static device_rng from_key(const uint32_t key[4], uint64_t pos,
                                                    uint32_t K) {
         device_rng r;
-        for (int w = 0; w < 4; w++) r.key[w] = key[w];
-        r.pos = pos;
-        r.K = K ? K : DEFAULT_K;
-        r.cache = ChunkCache{};
+        r.init(key, pos, K);
         return r;
     }
 
@@ -50,33 +43,22 @@ struct device_rng {
         return from_key(k, 0, K);
     }
 
+    __host__ __device__ GenState &st() { return *this; }
+    __host__ __device__ const GenState &st() const { return *this; }
+
     __host__ __device__ void skip_to(uint64_t p) { pos = p; }
     __host__ __device__ void load(uint64_t p) { cache.load(key, K, p); }
     __host__ __device__ uint64_t read(uint64_t p, unsigned w) { return cache.read(key, K, p, w); }
     __host__ __device__ uint64_t next(unsigned w) { return cache.next(key, K, pos, w); }
 
     __host__ __device__ bool next_bool() { return next(1) != 0; }
+    __host__ __device__ uint8_t next_u8() { return (uint8_t)next(8); }
+    __host__ __device__ uint16_t next_u16() { return (uint16_t)next(16); }
     __host__ __device__ uint32_t next_u32() { return (uint32_t)next(32); }
     __host__ __device__ uint64_t next_u64() { return next(64); }
+    __host__ __device__ uint16_t next_f16_bits() { return to_f16_bits(next_u16()); }
     __host__ __device__ float next_f32() { return to_f32(next_u32()); }
     __host__ __device__ double next_f64() { return to_f64(next_u64()); }
-
-    __host__ __device__ device_rng child(uint64_t counter, uint32_t domain, uint32_t aux,
-                                         bool hidden) const {
-        uint32_t k[4];
-        child_key(key, counter, domain, aux, hidden, k);
-        return from_key(k, 0, K);
-    }
-
-    /* Child by index, from the key alone. */
-    __host__ __device__ device_rng split(uint64_t index) const {
-        return child(index >> 1, DOMAIN_SPLIT, 0, index & 1u);
-    }
-
-    /* Child for a purpose, from the key alone. */
-    __host__ __device__ device_rng sub(uint64_t purpose) const {
-        return child(purpose, DOMAIN_FOLD, 0, false);
-    }
 };
 
 /* ---- Fills ------------------------------------------------------------------------------ */

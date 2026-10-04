@@ -382,40 +382,37 @@ struct ChunkCache {
     }
 };
 
-/* A generator: the transport form (key, bit position, chunk length K) plus one cached chunk
- * state, whose exposed half is block B(chunk, step). The cache is a pure function of the key
- * and K, so a copy draws the same values, and moving the position never invalidates it.
- * About 80 bytes, cheap to copy into a kernel. */
-class Rng {
+/* The transport form of a generator (key, bit position, chunk length K) plus one cached chunk
+ * state. */
+struct GenState {
+    uint32_t key[4];
+    uint64_t pos;
+    uint32_t K;
+    ChunkCache cache;
+
+    TANDEM_FN void init(const uint32_t k[4], uint64_t p, uint32_t length) {
+        for (int w = 0; w < 4; w++)
+            key[w] = k[w];
+        pos = p;
+        K = length ? length : DEFAULT_K;
+        cache = ChunkCache{};
+    }
+};
+
+/* The draw API shared by every scalar generator. D derives from Draws<D> and offers
+ * `GenState &st()` and its const form. Rng keeps the state private, device_rng in tandem.cuh
+ * exposes it. */
+template <class D> class Draws {
   public:
     static constexpr uint32_t MAX_URAND = 0xffffffffu;
     static constexpr uint64_t MAX_URAND64 = ~(uint64_t)0;
     static constexpr int32_t MAX_RAND = 0x7fffffff;
     static constexpr int64_t MAX_RAND64 = 0x7fffffffffffffff;
 
-    /* From a 128-bit seed as two halves, whitened as the specification requires. K is the
-     * chunk length, a power of two in [1, 65536], 0 for the default of 32. */
-    TANDEM_FN explicit Rng(uint64_t seed_lo = 0, uint64_t seed_hi = 0, uint32_t K = 0) {
-        uint32_t key[4];
-        seed_key(seed_lo, seed_hi, key);
-        init(key, 0, K);
-    }
-
-    TANDEM_FN static Rng from_key(const Key &key, uint64_t pos = 0, uint32_t K = 0) {
-        Rng r;
-        r.init(key.w, pos, K);
-        return r;
-    }
-
-    TANDEM_FN Key key() const { return Key{{key_[0], key_[1], key_[2], key_[3]}}; }
-    TANDEM_FN uint64_t position() const { return pos_; }
-    TANDEM_FN uint32_t chunk_length() const { return K_; }
-    TANDEM_FN void set_position(uint64_t p) { pos_ = p; }
-
     /* Scalar draws: align the position to the width, read, advance. */
-    TANDEM_FN bool bit() { return next(1) != 0; }
-    TANDEM_FN uint32_t urand() { return (uint32_t)next(32); }
-    TANDEM_FN uint64_t urand64() { return next(64); }
+    TANDEM_FN bool bit() { return raw(1) != 0; }
+    TANDEM_FN uint32_t urand() { return (uint32_t)raw(32); }
+    TANDEM_FN uint64_t urand64() { return raw(64); }
     TANDEM_FN float frand() { return to_f32(urand()); }
     TANDEM_FN double drand() { return to_f64(urand64()); }
 
@@ -474,53 +471,81 @@ class Rng {
     TANDEM_FN double at_drand(uint64_t i) const { return to_f64(at(i, 64)); }
 
     /* Children start at position 0 with the parent's K. split and sub read the key alone. */
-    TANDEM_FN Rng split(uint64_t index) const {
+    TANDEM_FN D child(uint64_t counter, uint32_t domain, uint32_t aux, bool hidden) const {
+        uint32_t k[4];
+        child_key(st().key, counter, domain, aux, hidden, k);
+        D r;
+        r.st().init(k, 0, st().K);
+        return r;
+    }
+    TANDEM_FN D split(uint64_t index) const {
         return child(index >> 1, DOMAIN_SPLIT, 0, index & 1u);
     }
-    TANDEM_FN Rng sub(uint64_t purpose) const { return child(purpose, DOMAIN_FOLD, 0, false); }
+    TANDEM_FN D sub(uint64_t purpose) const { return child(purpose, DOMAIN_FOLD, 0, false); }
     /* n children from the current block, then the position moves past that block. */
-    TANDEM_FN void fork(Rng *children, uint64_t n) {
-        uint64_t b = pos_ >> 7;
+    TANDEM_FN void fork(D *children, uint64_t n) {
+        uint64_t b = st().pos >> 7;
         for (uint64_t i = 0; i < n; i++)
             children[i] = child(b, DOMAIN_FORK, (uint32_t)(i >> 1), i & 1u);
-        pos_ = (b + 1u) << 7;
-    }
-
-    TANDEM_FN friend bool operator==(const Rng &a, const Rng &b) {
-        return a.key() == b.key() && a.pos_ == b.pos_ && a.K_ == b.K_;
+        st().pos = (b + 1u) << 7;
     }
 
   private:
-    uint32_t key_[4];
-    uint64_t pos_;
-    uint32_t K_;
-    ChunkCache cache_;
+    TANDEM_FN D &self() { return static_cast<D &>(*this); }
+    TANDEM_FN const D &self() const { return static_cast<const D &>(*this); }
+    TANDEM_FN GenState &st() { return self().st(); }
+    TANDEM_FN const GenState &st() const { return self().st(); }
 
-    TANDEM_FN void init(const uint32_t key[4], uint64_t pos, uint32_t K) {
-        for (int w = 0; w < 4; w++)
-            key_[w] = key[w];
-        pos_ = pos;
-        K_ = K ? K : DEFAULT_K;
-        cache_ = ChunkCache{};
+    TANDEM_FN uint64_t raw(unsigned w) {
+        GenState &g = st();
+        return g.cache.next(g.key, g.K, g.pos, w);
     }
 
-    TANDEM_FN uint64_t next(unsigned w) { return cache_.next(key_, K_, pos_, w); }
-
     TANDEM_FN uint64_t at(uint64_t i, unsigned w) const {
-        uint64_t p = align_pos(pos_, w) + i * w;
+        const GenState &g = st();
+        uint64_t p = align_pos(g.pos, w) + i * w;
         uint32_t b[4];
-        block(key_, chunk_of(p, K_), step_of(p, K_), b);
+        block(g.key, chunk_of(p, g.K), step_of(p, g.K), b);
         uint32_t lo = b[(p >> 5) & 3u];
         return w == 64u ? lo | ((uint64_t)b[((p >> 5) & 3u) + 1u] << 32) : lo;
     }
+};
 
-    TANDEM_FN Rng child(uint64_t counter, uint32_t domain, uint32_t aux, bool hidden) const {
-        uint32_t k[4];
-        child_key(key_, counter, domain, aux, hidden, k);
+/* A generator: the transport form (key, bit position, chunk length K) plus one cached chunk
+ * state, whose exposed half is block B(chunk, step). The cache is a pure function of the key
+ * and K, so a copy draws the same values, and moving the position never invalidates it.
+ * About 80 bytes, cheap to copy into a kernel. */
+class Rng : public Draws<Rng> {
+  public:
+    /* From a 128-bit seed as two halves, whitened as the specification requires. K is the
+     * chunk length, a power of two in [1, 65536], 0 for the default of 32. */
+    TANDEM_FN explicit Rng(uint64_t seed_lo = 0, uint64_t seed_hi = 0, uint32_t K = 0) {
+        uint32_t key[4];
+        seed_key(seed_lo, seed_hi, key);
+        s_.init(key, 0, K);
+    }
+
+    TANDEM_FN static Rng from_key(const Key &key, uint64_t pos = 0, uint32_t K = 0) {
         Rng r;
-        r.init(k, 0, K_);
+        r.s_.init(key.w, pos, K);
         return r;
     }
+
+    TANDEM_FN Key key() const { return Key{{s_.key[0], s_.key[1], s_.key[2], s_.key[3]}}; }
+    TANDEM_FN uint64_t position() const { return s_.pos; }
+    TANDEM_FN uint32_t chunk_length() const { return s_.K; }
+    TANDEM_FN void set_position(uint64_t p) { s_.pos = p; }
+
+    TANDEM_FN friend bool operator==(const Rng &a, const Rng &b) {
+        return a.key() == b.key() && a.s_.pos == b.s_.pos && a.s_.K == b.s_.K;
+    }
+
+  private:
+    friend class Draws<Rng>;
+    GenState s_;
+
+    TANDEM_FN GenState &st() { return s_; }
+    TANDEM_FN const GenState &st() const { return s_; }
 };
 
 } // namespace tandem

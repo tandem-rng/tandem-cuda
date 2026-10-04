@@ -25,9 +25,14 @@ It produces the stream the specification defines, bit for bit.
 - `tandem::fill_i8/i16/i32/i64`: the unsigned fill of the same width read in two's
   complement, as the specification defines signed integers.
 - `tandem::device_rng`: a per-thread generator for kernels that draw scalars. It holds the
-  transport form and one cached chunk state, about 20 registers. `from_key`, `seed`,
-  `next_bool/u32/u64/f32/f64`, `split`, `sub`, `skip_to`. Its draws follow the specification's
-  scalar rule for the same key and position, mixed widths included.
+  transport form (public fields `key`, `pos`, `K`) and one cached chunk state, about 20
+  registers. `from_key`, `seed`, `skip_to`, `next_bool/u8/u16/u32/u64/f16_bits/f32/f64`. Its
+  draws follow the specification's scalar rule for the same key and position, mixed widths
+  included. The rest of the draw API is `tandem::Rng`'s, shared through `Draws<D>` in
+  `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`
+  by Box-Muller, `at_urand/urand64/frand/drand(i)`, `child`, `split`, `sub` and `fork`.
+  Bounded draws and normals are not part of the specification. They match `tandem_u32_below`,
+  `tandem_u64_below` and `tandem_normal_f64` of the C library.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
   from `core.hpp`.
 
@@ -64,7 +69,10 @@ make test TANDEM_C=../tandem-c      # or: pixi install && pixi run test
 device scalar draws with reference stream dumps in `tests/data` (the bool, u8 and f16 dumps
 through the public launchers), and compares device fills at random keys,
 chunk lengths, positions, lengths and output alignments with the reference C implementation
-compiled into the test (a checkout at `TANDEM_C`). That covers u8, u16, u32, u64, f16 bits,
+compiled into the test (a checkout at `TANDEM_C`). One mixed sequence of draws on a device
+generator, with bounded draws at small and at rejecting ranges, normals, `at_*`, `fork`,
+`split` and `sub`, is compared with the C library, normals to 1e-12 and the rest bit for
+bit. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `pixi.toml` provides a CUDA
 12.8 toolchain from conda-forge for hosts without a system install.
