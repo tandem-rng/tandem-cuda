@@ -70,11 +70,11 @@ jobs:
       - if: matrix.cc == 'clang'
         run: make hostvec TANDEM_C=tandem-c HOSTCC=clang HOSTCXX=clang++
   vectors:
-    name: vector header is current
+    name: vector header and ziggurat tables are current
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - run: |
           git clone --depth 1 https://github.com/tandem-rng/spec ../tandem-spec
-          make vectors
-          git diff --exit-code tests/vectors.h
+          make vectors tables
+          git diff --exit-code tests/vectors.h include/tandem/normal_tables.hpp

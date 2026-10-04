@@ -5,7 +5,8 @@ CUDASTD ?= c++23
 NVCCFLAGS ?= -std=$(CUDASTD) -O3 $(ARCH) -Xcompiler -Wall,-Wextra
 TANDEM_C ?= ../tandem-c
 SPEC_VECTORS ?= ../tandem-spec/vectors.json
-HEADERS := tandem.cuh include/tandem/core.hpp
+SPEC_TABLES ?= ../tandem-spec/tables/normal_f64_zig1024.json
+HEADERS := tandem.cuh include/tandem/core.hpp include/tandem/normal_tables.hpp
 
 # clang is the host compiler, gcc is a compatibility build: make HOSTCXX=g++ HOSTCC=gcc.
 HOSTCXX ?= clang++
@@ -25,7 +26,7 @@ FMAFLAGS := $(if $(filter x86_64 amd64,$(shell uname -m)),-mavx2 -mfma,)
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test thrust hostvec bench clangcuda host vectors cross clean
+.PHONY: build test thrust hostvec bench clangcuda host vectors tables cross clean
 
 build: tests/test_cuda tests/test_thrust tools/bench
 
@@ -77,9 +78,13 @@ hostvec:
 	$(CXX_HOST) -std=c++17 -O2 $(FMAFLAGS) -Iinclude -I$(TANDEM_C) -Rpass=loop-vectorize -c -o /dev/null tests/host_core.cpp 2>&1 \
 	  | grep "core.hpp" | grep -c "vectorized loop" | awk '{ if ($$1 < 2) { print "normal blocks not vectorized"; exit 1 } else print "normal blocks vectorized" }'
 
-# Regenerate the vector header from a checkout of https://github.com/tandem-rng/spec.
+# Regenerate the vector header and the ziggurat tables from a checkout of
+# https://github.com/tandem-rng/spec.
 vectors:
 	python3 tools/gen_vectors.py $(SPEC_VECTORS) > tests/vectors.h
+
+tables:
+	python3 tools/gen_normal_tables.py $(SPEC_TABLES) > include/tandem/normal_tables.hpp
 
 # Regenerate the fill fixtures from core.hpp alone, on any host compiler.
 cross:
