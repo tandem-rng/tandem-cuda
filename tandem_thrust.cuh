@@ -53,17 +53,20 @@ template <class T> struct uniform : detail::stream_ref {
 
 /* Bounded draws on [0, range), uint32_t or uint64_t, as fill_u32_below and fill_u64_below. */
 template <class T> struct below : detail::stream_ref {
-    T range;
+    T range, thresh;
 
     below(const uint32_t key[4], T range, uint32_t K = DEFAULT_K, uint64_t pos = 0)
-        : detail::stream_ref(key, K, pos), range(range) {}
+        : detail::stream_ref(key, K, pos), range(range) {
+        if constexpr (std::is_same<T, uint32_t>::value) thresh = below_threshold_u32(range);
+        else thresh = below_threshold_u64(range);
+    }
 
     __host__ __device__ T operator()(uint64_t i) const {
         device_rng r = rng();
         if constexpr (std::is_same<T, uint32_t>::value)
-            return below_u32(r.at_urand(i), range, key, K, i);
+            return below_u32_t(r.at_urand(i), range, thresh, key, K, i);
         else
-            return below_u64(r.at_urand64(i), range, key, K, i);
+            return below_u64_t(r.at_urand64(i), range, thresh, key, K, i);
     }
 };
 

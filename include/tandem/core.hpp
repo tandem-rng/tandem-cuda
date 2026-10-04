@@ -811,26 +811,35 @@ TANDEM_COLD TANDEM_FN uint64_t below_retry_u64(uint64_t range, uint64_t t, const
     return mulhi64(x, range);
 }
 
+/* The rejection threshold, 2^32 mod range (2^64 for the 64-bit form), which a bounded fill
+ * computes once. A draw rejects when the low word of its product is below it. */
+TANDEM_FN uint32_t below_threshold_u32(uint32_t range) { return range ? (0u - range) % range : 0u; }
+TANDEM_FN uint64_t below_threshold_u64(uint64_t range) { return range ? (0u - range) % range : 0u; }
+
+/* With the threshold t given, so the division stays out of the per-element path. */
+TANDEM_FN uint32_t below_u32_t(uint32_t u, uint32_t range, uint32_t t, const uint32_t key[4],
+                               uint32_t K, uint64_t e) {
+    uint64_t m = (uint64_t)u * range;
+    if ((uint32_t)m < t)
+        return below_retry_u32(range, t, key, K, e);
+    return (uint32_t)(m >> 32);
+}
+
+TANDEM_FN uint64_t below_u64_t(uint64_t x, uint64_t range, uint64_t t, const uint32_t key[4],
+                               uint32_t K, uint64_t e) {
+    if (x * range < t)
+        return below_retry_u64(range, t, key, K, e);
+    return mulhi64(x, range);
+}
+
 TANDEM_FN uint32_t below_u32(uint32_t u, uint32_t range, const uint32_t key[4], uint32_t K,
                              uint64_t e) {
-    uint64_t m = (uint64_t)u * range;
-    if ((uint32_t)m < range) {
-        uint32_t t = (0u - range) % range;
-        if ((uint32_t)m < t)
-            return below_retry_u32(range, t, key, K, e);
-    }
-    return (uint32_t)(m >> 32);
+    return below_u32_t(u, range, below_threshold_u32(range), key, K, e);
 }
 
 TANDEM_FN uint64_t below_u64(uint64_t x, uint64_t range, const uint32_t key[4], uint32_t K,
                              uint64_t e) {
-    uint64_t lo = x * range;
-    if (lo < range) {
-        uint64_t t = (0u - range) % range;
-        if (lo < t)
-            return below_retry_u64(range, t, key, K, e);
-    }
-    return mulhi64(x, range);
+    return below_u64_t(x, range, below_threshold_u64(range), key, K, e);
 }
 
 } // namespace tandem

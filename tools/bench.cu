@@ -105,8 +105,20 @@ int main() {
 
     std::printf("%-34s %10.0f\n", "tandem fill_u32_below(1000)",
                 best_gibs(N * 4, [&] { tandem::fill_u32_below(key, 0, 32, 1000u, u32, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_u32_below(2^32 - 2)",
+                best_gibs(N * 4, [&] { tandem::fill_u32_below(key, 0, 32, 0xfffffffeu, u32, N); }));
+#ifndef TANDEM_BENCH_OLD
+    std::printf("%-34s %10.0f\n", "tandem fill_u32_below, low, i32",
+                best_gibs(N * 4, [&] { tandem::fill_u32_below(key, 0, 32, 0xfffffffeu, (int32_t)-7, reinterpret_cast<int32_t *>(u32), N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_u32_below, low, i64",
+                best_gibs(N * 8, [&] { tandem::fill_u32_below(key, 0, 32, 1000u, (int64_t)-7, reinterpret_cast<int64_t *>(u64), N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_u64_below, low, i64",
+                best_gibs(N * 8, [&] { tandem::fill_u64_below(key, 0, 32, ~0ull - 1, (int64_t)-7, reinterpret_cast<int64_t *>(u64), N); }));
+#endif
     std::printf("%-34s %10.0f\n", "tandem fill_u64_below(1000)",
                 best_gibs(N * 8, [&] { tandem::fill_u64_below(key, 0, 32, 1000u, u64, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_u64_below(2^64 - 2)",
+                best_gibs(N * 8, [&] { tandem::fill_u64_below(key, 0, 32, ~0ull - 1, u64, N); }));
     std::printf("%-34s %10.0f\n", "tandem fill_normal_f32",
                 best_gibs(N * 4, [&] { tandem::fill_normal_f32(key, 0, 32, f32, N); }));
     std::printf("%-34s %10.0f\n", "tandem fill_normal_f64",

@@ -26,6 +26,12 @@ It produces the stream the specification defines, bit for bit.
   complement, as the specification defines signed integers.
 - `tandem::fill_u32_below(key, pos, K, range, out, n, stream)`, `fill_u64_below`: `n` draws
   uniform on `[0, range)`, as `Rng::urand(range)`. Not part of the specification.
+- `tandem::fill_u32_below(key, pos, K, range, low, out, n, stream)` and `fill_u64_below` with a
+  low bound: `out[e] = low + draw[e]`, summed in the output type and wrapping, so the output
+  can be `uint32_t` or `int32_t`, and for a 32-bit range also `uint64_t` or `int64_t`, which
+  widens the 32-bit draw into an 8-byte element. The draws and the consumed bits are those of the
+  plain fill, and the offset and the widening are fused into the store, so there is no second
+  pass. `fill_u64_below` takes a `uint64_t` or `int64_t` low bound and output.
 - `tandem::fill_normal_f64/f32(key, pos, K, out, n, stream)`: `n` standard normals, both
   Box-Muller halves per two uniforms, as the flattened `Rng::normal2()` or `normalf2()`
   calls. Not part of the specification.
@@ -96,7 +102,8 @@ bit. `tests/cross_fill_normal.h` holds normal fixtures for ports at even and odd
 
 **Bounded integers.** Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
 Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
-`2^32 mod range` (or its 64-bit analogue), result the high word. The fill consumes exactly `n`
+`2^32 mod range` (or its 64-bit analogue), result the high word. The threshold `2^32 mod range` is computed once per fill, not per element, which took
+large ranges from 1107 to 1348 GiB/s (`u32`) and from 644 to 1351 (`u64`). The fill consumes exactly `n`
 draws, so it returns `align(pos, w) + w n` at once, without waiting for the device. A sequential
 `Rng::urand(range)` loop would consume extra draws after a rejection, and a parallel fill
 cannot know how many. So a rejected draw `e` retries on a fallback stream: draws `0, 1, ...` of
@@ -231,6 +238,10 @@ buffer. The elements are
 | `tandem::fill_bool` (one byte per bit) | 1212 |
 | `tandem::fill_u32_below(1000)` | 1336 |
 | `tandem::fill_u64_below(1000)` | 1348 |
+| `tandem::fill_u32_below(2^32 - 2)`, `fill_u64_below(2^64 - 2)` (rejects about every draw's threshold check) | 1348, 1351 |
+| `tandem::fill_u32_below` with a low bound into `int32_t` | 1348 |
+| `tandem::fill_u32_below` with a low bound into `int64_t` (8-byte elements) | 955 |
+| `tandem::fill_u64_below` with a low bound into `int64_t` | 1352 |
 | `tandem::fill_normal_f64` | 750 |
 | `tandem::fill_normal_f64`, start at an odd Float64 draw | 595 |
 | `tandem::fill_normal_f32` | 1290 |

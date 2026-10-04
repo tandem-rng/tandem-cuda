@@ -503,6 +503,74 @@ static void check_below_sequential(std::mt19937_64 &gen, const char *label, T ra
     }
 }
 
+// A low bound adds to the draw in the output type, wrapping, and a wider output stores the
+// 32-bit draw zero-extended. The draws and the position are those of the plain fill.
+template <class O, class W, class Plain, class Low>
+static void check_below_low(std::mt19937_64 &gen, const char *label, W range, O low, Plain plain,
+                            Low launch) {
+    for (int trial = 0; trial < 12; trial++) {
+        uint32_t key[4];
+        for (auto &w : key) w = (uint32_t)gen();
+        uint32_t K = 1u << (gen() % 8);
+        uint64_t pos = gen() % (1u << 20);
+        size_t n = (size_t)(gen() % 30000);
+        std::vector<W> base = plain(key, pos, K, range, n);
+        using U = std::make_unsigned_t<O>;
+        dev<O> d(n + 2);
+        uint64_t end = launch(key, pos, K, range, low, d.p, n);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<O> got = d.host();
+        got.resize(n);
+        bool ok = true;
+        for (size_t e = 0; e < n; e++) ok &= got[e] == (O)(U)((U)low + (U)base[e]);
+        CHECK(ok);
+        CHECK(end == (n ? tandem::align_pos(pos, sizeof(W) * 8) + (uint64_t)n * sizeof(W) * 8 : pos));
+        if (!ok) std::printf("FAIL %s below_low(%llu) trial %d\n", label, (unsigned long long)range, trial);
+    }
+}
+
+static void test_below_low() {
+    std::mt19937_64 gen(1999);
+    auto plain32 = [](const uint32_t *k, uint64_t p, uint32_t K, uint32_t r, size_t n) {
+        dev<uint32_t> d(n + 2);
+        tandem::fill_u32_below(k, p, K, r, d.p, n);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        auto h = d.host();
+        h.resize(n);
+        return h;
+    };
+    auto plain64 = [](const uint32_t *k, uint64_t p, uint32_t K, uint64_t r, size_t n) {
+        dev<uint64_t> d(n + 2);
+        tandem::fill_u64_below(k, p, K, r, d.p, n);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        auto h = d.host();
+        h.resize(n);
+        return h;
+    };
+    auto l32 = [](const uint32_t *k, uint64_t p, uint32_t K, uint32_t r, auto low, auto *o, size_t n) {
+        return tandem::fill_u32_below(k, p, K, r, low, o, n);
+    };
+    auto l64 = [](const uint32_t *k, uint64_t p, uint32_t K, uint64_t r, auto low, auto *o, size_t n) {
+        return tandem::fill_u64_below(k, p, K, r, low, o, n);
+    };
+    // Ranges that reject often (3e9), rarely (1000) and the full range minus one.
+    for (uint32_t r : {1000u, 3000000000u, 0xfffffffeu}) {
+        check_below_low<uint32_t>(gen, "u32->u32", r, 4000000000u, plain32, l32);
+        check_below_low<int32_t>(gen, "u32->i32", r, (int32_t)-1000, plain32, l32);
+        check_below_low<uint64_t>(gen, "u32->u64", r, 5000000000ull, plain32, l32);
+        check_below_low<int64_t>(gen, "u32->i64", r, (int64_t)-5000000000ll, plain32, l32);
+    }
+    for (uint64_t r : {1000ull, 0xc000000000003039ull}) {
+        check_below_low<uint64_t>(gen, "u64->u64", r, 0xfffffffffffffff0ull, plain64, l64);
+        check_below_low<int64_t>(gen, "u64->i64", r, (int64_t)-7, plain64, l64);
+    }
+    // The threshold is computed once: range 0 returns the low bound and consumes the draws.
+    dev<int32_t> z(8);
+    CHECK(tandem::fill_u32_below(KEY1234, 0, 32, 0, (int32_t)5, z.p, 8) == 8 * 32);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    for (int32_t v : z.host()) CHECK(v == 5 || v == 0 /* the two spare elements */);
+}
+
 static void test_below() {
     std::mt19937_64 gen(5150);
     auto l32 = [](const uint32_t *k, uint64_t p, uint32_t K, uint32_t r, uint32_t *o, size_t n) {
@@ -773,6 +841,7 @@ int main(int argc, char **argv) {
     test_signed();
     test_device_api();
     test_below();
+    test_below_low();
     test_cross_below();
     test_normal();
     test_cross_normal();
