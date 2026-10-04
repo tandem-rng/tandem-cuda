@@ -301,20 +301,22 @@ __global__ void __launch_bounds__(THREADS)
     }
 }
 
-/* Normal fill. Element i is Box-Muller of the Float64 draws 2i and 2i + 1 of the fill, so the
- * first draw of the fill sits at the position aligned to 64 bits. With that position at an
- * even draw, both draws of an element are the halves of one block. At an odd draw (ODD) they
+/* Normal fill. Pair j, the elements 2j (cos half) and 2j + 1 (sin half), is one Box-Muller step
+ * of the Float64 draws 2j and 2j + 1 of the fill, so the first draw of the fill sits at the
+ * position aligned to 64 bits. With that position at an even draw, both draws of a pair are
+ * the halves of one block. At an odd draw (ODD) they
  * are the high half of one block and the low half of the next, so each thread also steps the
  * chunk that holds its predecessor block: chunk c - 1, or for lane 0 the last lane of the
  * previous row, which is chunk 8g + 7 one step behind or, at step 0, the previous group's. Block
- * `ba` is the first block that yields an element, `bb` the last. One element per block. */
+ * `ba` is the first block that yields a pair, `bb` the last. One pair per block. */
 template <class O, bool ODD>
 __global__ void __launch_bounds__(THREADS)
     fill_normal_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3, uint32_t K,
-                       uint64_t g0, uint64_t ba, uint64_t bb, O *out) {
+                       uint64_t g0, uint64_t ba, uint64_t bb, uint64_t n, O *out) {
     uint64_t c = 8u * g0 + blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
     uint64_t g = c >> 3, lane = c & 7u;
     if (g * K * 8u > bb) return;
+    const bool vec = (reinterpret_cast<uintptr_t>(out) & 15u) == 0;
     const uint32_t key[4] = {key0, key1, key2, key3};
     uint32_t o[4], h[4], po[4] = {0, 0, 0, 0}, ph[4] = {0, 0, 0, 0};
     F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
@@ -333,7 +335,14 @@ __global__ void __launch_bounds__(THREADS)
         }
         uint64_t u = ODD ? prev[2] | ((uint64_t)prev[3] << 32) : o[0] | ((uint64_t)o[1] << 32);
         uint64_t v = ODD ? o[0] | ((uint64_t)o[1] << 32) : o[2] | ((uint64_t)o[3] << 32);
-        out[beta - ba] = (O)box_muller(to_f64(u), to_f64(v));
+        Pair2<double> z = box_muller2(to_f64(u), to_f64(v));
+        uint64_t e = 2u * (beta - ba);
+        if (e + 1 < n) {
+            if (vec) *reinterpret_cast<double2 *>(out + e) = make_double2(z.z0, z.z1);
+            else { out[e] = (O)z.z0; out[e + 1] = (O)z.z1; }
+        } else {
+            out[e] = (O)z.z0;
+        }
     }
 }
 
@@ -341,34 +350,37 @@ template <class O>
 inline uint64_t fill_normal(const uint32_t key[4], uint64_t pos, uint32_t K, O *out, size_t n,
                             cudaStream_t stream) {
     K = K ? K : DEFAULT_K;
-    uint64_t p0 = align_pos(pos, 64), p1 = p0 + (uint64_t)n * 128u;
+    uint64_t pairs = ((uint64_t)n + 1u) / 2u;
+    uint64_t p0 = align_pos(pos, 64), p1 = p0 + pairs * 128u;
     if (n == 0) return p1;
     bool odd = (p0 >> 6) & 1u;
-    uint64_t ba = (p0 >> 7) + (odd ? 1u : 0u), bb = ba + n - 1u;
+    uint64_t ba = (p0 >> 7) + (odd ? 1u : 0u), bb = ba + pairs - 1u;
     uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K;
     unsigned blocks = (unsigned)((8u * (g1 - g0 + 1u) + THREADS - 1) / THREADS);
     if (odd)
         fill_normal_kernel<O, true><<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2],
-                                                                    key[3], K, g0, ba, bb, out);
+                                                                    key[3], K, g0, ba, bb, n, out);
     else
         fill_normal_kernel<O, false><<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2],
-                                                                     key[3], K, g0, ba, bb, out);
+                                                                     key[3], K, g0, ba, bb, n, out);
     return p1;
 }
 
-/* Float normal fill. Element i is Box-Muller in float of the Float32 draws 2i and 2i + 1 of the
- * fill that starts at the position aligned to 32 bits. With s0 the index of the first Float32
- * draw, a block holds two elements: slots 0 and 1, 2 and 3 when s0 is even, or slots 3 of the
- * previous block with 0, and 1 with 2, when s0 is odd. The odd case steps the predecessor chunk
- * as fill_normal_kernel does. `ba` and `bb` bound the blocks that can hold an element. */
+/* Float normal fill. Pair j is one float Box-Muller step of the Float32 draws 2j and 2j + 1 of
+ * the fill that starts at the position aligned to 32 bits, giving elements 2j and 2j + 1. With
+ * s0 the index of the first Float32 draw, a block holds two pairs: slots 0 and 1, 2 and 3 when
+ * s0 is even, or slot 3 of the previous block with slot 0, and slots 1 and 2, when s0 is odd.
+ * The odd case steps the predecessor chunk as fill_normal_kernel does. `ba` and `bb` bound the
+ * blocks that can hold a pair, `np` is the number of pairs. */
 template <bool ODD>
 __global__ void __launch_bounds__(THREADS)
     fill_normal32_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3, uint32_t K,
-                         uint64_t g0, uint64_t s0, uint64_t n, uint64_t ba, uint64_t bb,
-                         float *out) {
+                         uint64_t g0, uint64_t s0, uint64_t n, uint64_t np, uint64_t ba,
+                         uint64_t bb, float *out) {
     uint64_t c = 8u * g0 + blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
     uint64_t g = c >> 3, lane = c & 7u;
     if (g * K * 8u > bb) return;
+    const bool vec = (reinterpret_cast<uintptr_t>(out) & 7u) == 0;
     const uint32_t key[4] = {key0, key1, key2, key3};
     uint32_t o[4], h[4], po[4] = {0, 0, 0, 0}, ph[4] = {0, 0, 0, 0};
     F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
@@ -379,7 +391,7 @@ __global__ void __launch_bounds__(THREADS)
         T(o, h);
         if (ODD && (lane || j)) T(po, ph);
         if (beta < ba) continue;
-        /* Index of the element that starts at slot 4 beta (or 4 beta - 1), then the next one. */
+        /* Index of the pair that starts at slot 4 beta (or 4 beta - 1), then the next one. */
         int64_t e = ((int64_t)(4u * beta) - (ODD ? 1 : 0) - (int64_t)s0) / 2;
         uint32_t q[4];
         const uint32_t *prev = po;
@@ -387,29 +399,38 @@ __global__ void __launch_bounds__(THREADS)
             block(key, 8u * (g - 1u) + 7u, K - 1u, q);
             prev = q;
         }
-        if (e >= 0 && e < (int64_t)n)
-            out[e] = ODD ? box_muller_f32(to_f32(prev[3]), to_f32(o[0]))
-                         : box_muller_f32(to_f32(o[0]), to_f32(o[1]));
-        if (e + 1 >= 0 && e + 1 < (int64_t)n)
-            out[e + 1] = ODD ? box_muller_f32(to_f32(o[1]), to_f32(o[2]))
-                             : box_muller_f32(to_f32(o[2]), to_f32(o[3]));
+        for (int k = 0; k < 2; k++) {
+            int64_t pj = e + k;
+            if (pj < 0 || pj >= (int64_t)np) continue;
+            uint32_t ua = ODD ? (k ? o[1] : prev[3]) : o[2 * k];
+            uint32_t ub = ODD ? (k ? o[2] : o[0]) : o[2 * k + 1];
+            Pair2<float> z = box_muller2_f32(to_f32(ua), to_f32(ub));
+            uint64_t at = 2u * (uint64_t)pj;
+            if (at + 1 < n) {
+                if (vec) *reinterpret_cast<float2 *>(out + at) = make_float2(z.z0, z.z1);
+                else { out[at] = z.z0; out[at + 1] = z.z1; }
+            } else {
+                out[at] = z.z0;
+            }
+        }
     }
 }
 
 inline uint64_t fill_normal_f32_impl(const uint32_t key[4], uint64_t pos, uint32_t K,
                                      float *out, size_t n, cudaStream_t stream) {
     K = K ? K : DEFAULT_K;
-    uint64_t p0 = align_pos(pos, 32), p1 = p0 + (uint64_t)n * 64u;
+    uint64_t np = ((uint64_t)n + 1u) / 2u;
+    uint64_t p0 = align_pos(pos, 32), p1 = p0 + np * 64u;
     if (n == 0) return p1;
-    uint64_t s0 = p0 >> 5, ba = s0 >> 2, bb = (s0 + 2u * n - 1u) >> 2;
+    uint64_t s0 = p0 >> 5, ba = s0 >> 2, bb = (s0 + 2u * np - 1u) >> 2;
     uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K;
     unsigned blocks = (unsigned)((8u * (g1 - g0 + 1u) + THREADS - 1) / THREADS);
     if (s0 & 1u)
-        fill_normal32_kernel<true><<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2], key[3],
-                                                                   K, g0, s0, n, ba, bb, out);
+        fill_normal32_kernel<true><<<blocks, THREADS, 0, stream>>>(
+            key[0], key[1], key[2], key[3], K, g0, s0, n, np, ba, bb, out);
     else
-        fill_normal32_kernel<false><<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2], key[3],
-                                                                    K, g0, s0, n, ba, bb, out);
+        fill_normal32_kernel<false><<<blocks, THREADS, 0, stream>>>(
+            key[0], key[1], key[2], key[3], K, g0, s0, n, np, ba, bb, out);
     return p1;
 }
 
@@ -529,11 +550,12 @@ inline uint64_t fill_u64_below(const uint32_t key[4], uint64_t pos, uint32_t K, 
     return detail::fill<detail::below64>(key, pos, K, out, n, stream, true, range);
 }
 
-/* Standard normals by Box-Muller. fill_normal_f64 is Rng::normal: element i is made from the
- * Float64 draws 2i and 2i + 1 of the fill that starts at the position aligned to 64 bits, so
- * the fill consumes 128 n bits and equals n successive Rng::normal() calls. fill_normal_f32 is
- * Rng::normalf: element i is made in float from the Float32 draws 2i and 2i + 1 of the fill
- * that starts at the position aligned to 32 bits, 64 n bits in all. Device log and cos differ
+/* Standard normals by Box-Muller. fill_normal_f64 is the flattened Rng::normal2 calls:
+ * pair j, elements 2j (cos half) and 2j + 1 (sin half), comes from the Float64 draws 2j and
+ * 2j + 1 of the fill that starts at the position aligned to 64 bits. The fill consumes
+ * 2 ceil(n / 2) draws, so an odd n uses the cos half of its last pair and still advances past
+ * both draws. fill_normal_f32 is the same on Rng::normalf2 with float arithmetic and Float32
+ * draws, aligned to 32 bits. Device log and cos differ
  * from the host's in the last bits, so normals agree to a few ulps, not bit for bit. Not part
  * of the specification. */
 inline uint64_t fill_normal_f64(const uint32_t key[4], uint64_t pos, uint32_t K, double *out,

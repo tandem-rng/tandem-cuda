@@ -10,6 +10,7 @@
 #include "../tandem.cuh"
 #include "vectors.h"
 #include "cross_fill_below.h"
+#include "cross_fill_normal.h"
 
 extern "C" {
 #include "tandem.h"
@@ -319,7 +320,8 @@ struct ApiOut {
     uint64_t at64[API_AT];
     float atf32[API_AT];
     double atf64[API_AT];
-    float normalf[API_N];
+    float normalf[API_N], pairf[2 * API_N];
+    double pair[2 * API_N];
     uint64_t fork[API_CHILD], split, sub, pos;
 };
 
@@ -332,6 +334,10 @@ __global__ void api_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, u
         o->below64[i] = r.urand64(range64);
         o->normal[i] = r.normal();
         o->normalf[i] = r.normalf();
+        tandem::Pair2<double> p2 = r.normal2();
+        o->pair[2 * i] = p2.z0, o->pair[2 * i + 1] = p2.z1;
+        tandem::Pair2<float> pf = r.normalf2();
+        o->pairf[2 * i] = pf.z0, o->pairf[2 * i + 1] = pf.z1;
         o->u8[i] = r.next_u8();
         o->u16[i] = r.next_u16();
         o->f16[i] = r.next_f16_bits();
@@ -372,6 +378,17 @@ static void check_device_api(const uint32_t key[4], uint64_t pos, uint32_t K, ui
         float fa = tandem_next_f32(&c), fb = tandem_next_f32(&c);
         float zf = sqrtf(-2.0f * logf(1.0f - fa)) * cosf(2.0f * 3.14159265358979323846f * fb);
         bad += !(std::fabs(g.normalf[i] - zf) <= 4 * 0x1p-23f * (1.0f + std::fabs(zf)));
+        {
+            double da = tandem_next_f64(&c), db = tandem_next_f64(&c); // argument order is unspecified
+            auto p2 = tandem::box_muller2(da, db);
+            bad += !(std::fabs(g.pair[2 * i] - p2.z0) <= 1e-12 * (1.0 + std::fabs(p2.z0)));
+            bad += !(std::fabs(g.pair[2 * i + 1] - p2.z1) <= 1e-12 * (1.0 + std::fabs(p2.z1)));
+            float qa = tandem_next_f32(&c), qb = tandem_next_f32(&c);
+            auto pf = tandem::box_muller2_f32(qa, qb);
+            bad += !(std::fabs(g.pairf[2 * i] - pf.z0) <= 4 * 0x1p-23f * (1.0f + std::fabs(pf.z0)));
+            bad += !(std::fabs(g.pairf[2 * i + 1] - pf.z1) <=
+                     4 * 0x1p-23f * (1.0f + std::fabs(pf.z1)));
+        }
         bad += g.u8[i] != tandem_next_u8(&c);
         bad += g.u16[i] != tandem_next_u16(&c);
         bad += g.f16[i] != tandem_next_f16_bits(&c);
@@ -525,26 +542,60 @@ static void test_cross_below() {
     }
 }
 
-// Normals equal the C fill, including starts at an odd 64-bit draw, where each element spans two
-// blocks. The device log and cos differ from the host's by a few ulp.
-template <class T, void (*cfill)(tandem_rng *, T *, size_t),
+// The normal fixtures other ports match, at even and odd starts.
+template <class T, class F, uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
+static void check_cross_normal(const F &f, double tol) {
+    dev<T> d(f.n + 2);
+    launch(CROSS_FILL_KEY, f.pos, 32, d.p, f.n, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    auto got = d.host();
+    size_t bad = 0;
+    for (size_t i = 0; i < f.n; i++)
+        bad += !(std::fabs((double)got[i] - (double)f.out[i]) <= tol * (1.0 + std::fabs((double)f.out[i])));
+    if (bad) {
+        std::printf("FAIL normal fixture at pos %llu: %zu elements differ\n", (unsigned long long)f.pos, bad);
+        failures++;
+    }
+}
+
+static void test_cross_normal() {
+    for (const auto &f : CROSS_NORMAL64)
+        check_cross_normal<double, cross_normal64, tandem::fill_normal_f64>(f, 1e-12);
+    for (const auto &f : CROSS_NORMAL32)
+        check_cross_normal<float, cross_normal32, tandem::fill_normal_f32>(f, 4 * 0x1p-23);
+}
+
+// Normal fills: pair j is one Box-Muller step of the uniform draws 2j and 2j + 1, cos half first,
+// and an odd n drops the last sin half but still consumes both draws. The reference runs the host
+// step on the C library's uniform fills, at every start slot, including starts at an odd draw
+// where each pair spans two blocks. Device sincospi and log differ from the host by a few ulp.
+template <class T, void (*cfill)(tandem_rng *, T *, size_t), unsigned W,
+          tandem::Pair2<T> (*step)(T, T),
           uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
 static void check_normal(std::mt19937_64 &gen, const char *label, double tol) {
-    for (int trial = 0; trial < 40; trial++) {
+    for (int trial = 0; trial < 80; trial++) {
         uint32_t key[4];
         for (auto &w : key) w = (uint32_t)gen();
         uint32_t K = 1u << (gen() % 8);
-        uint64_t pos = gen() % (1u << 20);
-        if (trial % 2) pos |= 64; // an odd Float64 draw
-        size_t n = (size_t)(gen() % (trial < 30 ? 3000 : 100000));
+        uint64_t pos = (gen() % (1u << 20)) & ~(uint64_t)127;
+        pos += (W / 4) * (trial % (128 / W)) + (trial % 3 == 0 ? 7 : 0); // every draw slot
+        size_t n = (size_t)(gen() % (trial < 60 ? 3000 : 100000));
+        if (trial % 5 == 0) n |= 1; // odd n
+        size_t np = (n + 1) / 2;
         tandem_rng c = tandem_from_key(key, pos, K);
-        std::vector<T> want(n);
-        cfill(&c, want.data(), n);
+        std::vector<T> u(2 * np), want(n);
+        cfill(&c, u.data(), 2 * np);
+        for (size_t j = 0; j < np; j++) {
+            auto z = step(u[2 * j], u[2 * j + 1]);
+            want[2 * j] = z.z0;
+            if (2 * j + 1 < n) want[2 * j + 1] = z.z1;
+        }
         dev<T> d(n + 2);
         uint64_t end = launch(key, pos, K, d.p, n, 0);
         CUDA_CHECK(cudaDeviceSynchronize());
         std::vector<T> got = d.host();
-        CHECK(end == tandem::align_pos(pos, 64) + (uint64_t)n * 128u);
+        CHECK(end == tandem::align_pos(pos, W) + (uint64_t)np * 2u * W);
+        CHECK(end == tandem_position(&c));
         size_t bad = 0;
         for (size_t i = 0; i < n; i++)
             bad += !(std::fabs((double)got[i] - (double)want[i]) <=
@@ -557,42 +608,12 @@ static void check_normal(std::mt19937_64 &gen, const char *label, double tol) {
     }
 }
 
-// The float fill: element i is Box-Muller in float of the Float32 draws 2i and 2i + 1, from a
-// start aligned to 32 bits, at every start offset modulo 128 bits. Reference on C draws.
-static void check_normal_f32(std::mt19937_64 &gen) {
-    for (int trial = 0; trial < 60; trial++) {
-        uint32_t key[4];
-        for (auto &w : key) w = (uint32_t)gen();
-        uint32_t K = 1u << (gen() % 8);
-        uint64_t pos = (gen() % (1u << 20)) & ~(uint64_t)127;
-        pos += 32 * (trial % 4) + (trial % 3 == 0 ? 7 : 0); // all four slots, some unaligned
-        size_t n = (size_t)(gen() % (trial < 45 ? 3000 : 100000));
-        tandem_rng c = tandem_from_key(key, pos, K);
-        std::vector<float> u(2 * n), want(n);
-        tandem_fill_f32(&c, u.data(), 2 * n);
-        for (size_t i = 0; i < n; i++)
-            want[i] = sqrtf(-2.0f * logf(1.0f - u[2 * i])) *
-                      cosf(2.0f * 3.14159265358979323846f * u[2 * i + 1]);
-        dev<float> d(n + 2);
-        uint64_t end = tandem::fill_normal_f32(key, pos, K, d.p, n, 0);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        std::vector<float> got = d.host();
-        CHECK(end == tandem::align_pos(pos, 32) + (uint64_t)n * 64u);
-        size_t bad = 0;
-        for (size_t i = 0; i < n; i++)
-            bad += !(std::fabs(got[i] - want[i]) <= 4 * 0x1p-23f * (1.0f + std::fabs(want[i])));
-        if (bad) {
-            std::printf("FAIL f32 normal fill: %zu elements differ (trial %d K=%u pos=%llu n=%zu)\n",
-                        bad, trial, K, (unsigned long long)pos, n);
-            failures++;
-        }
-    }
-}
-
 static void test_normal() {
     std::mt19937_64 gen(8675);
-    check_normal<double, tandem_fill_normal_f64, tandem::fill_normal_f64>(gen, "f64", 1e-12);
-    check_normal_f32(gen);
+    check_normal<double, tandem_fill_f64, 64, tandem::box_muller2, tandem::fill_normal_f64>(
+        gen, "f64", 1e-12);
+    check_normal<float, tandem_fill_f32, 32, tandem::box_muller2_f32, tandem::fill_normal_f32>(
+        gen, "f32", 4 * 0x1p-23);
 }
 
 // Successive generator fills continue one stream: the same values and positions as the C
@@ -630,7 +651,15 @@ static void test_generator() {
     tandem_fill_u64(&c, w64.data(), 5);
     tandem_fill_f32(&c, wf.data(), 9);
     tandem_fill_u32_below(&c, w32.data() + 100, 50, 6);
-    tandem_fill_normal_f64(&c, wz.data() + 100, 77);
+    {   // 77 normals are 39 pairs of f64 draws, the sin half of the last pair dropped
+        std::vector<double> u(78);
+        tandem_fill_f64(&c, u.data(), 78);
+        for (size_t j = 0; j < 39; j++) {
+            auto z = tandem::box_muller2(u[2 * j], u[2 * j + 1]);
+            wz[100 + 2 * j] = z.z0;
+            if (2 * j + 1 < 77) wz[100 + 2 * j + 1] = z.z1;
+        }
+    }
     tandem_fill_u16(&c, w16.data(), 11);
 
     auto h32 = d32.host();
@@ -698,6 +727,7 @@ int main(int argc, char **argv) {
     test_below();
     test_cross_below();
     test_normal();
+    test_cross_normal();
     test_generator();
     if (failures) {
         std::printf("%d failures\n", failures);

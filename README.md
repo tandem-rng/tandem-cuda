@@ -26,8 +26,9 @@ It produces the stream the specification defines, bit for bit.
   complement, as the specification defines signed integers.
 - `tandem::fill_u32_below(key, pos, K, range, out, n, stream)`, `fill_u64_below`: `n` draws
   uniform on `[0, range)`, as `Rng::urand(range)`. Not part of the specification.
-- `tandem::fill_normal_f64/f32(key, pos, K, out, n, stream)`: `n` standard normals by
-  Box-Muller, as `Rng::normal()`. Not part of the specification.
+- `tandem::fill_normal_f64/f32(key, pos, K, out, n, stream)`: `n` standard normals, both
+  Box-Muller halves per two uniforms, as the flattened `Rng::normal2()` or `normalf2()`
+  calls. Not part of the specification.
 - `tandem::generator`: a host handle with public `key`, `pos` and `K`, built by `from_key` or
   `seed`. Its `fill_*` methods (every fill above, with the range first for the bounded ones) take
   the output pointer, `n` and a stream, fill from `pos`, and set `pos` to the position the
@@ -37,8 +38,8 @@ It produces the stream the specification defines, bit for bit.
   registers. `from_key`, `seed`, `skip_to`, `next_bool/u8/u16/u32/u64/f16_bits/f32/f64`. Its
   draws follow the specification's scalar rule for the same key and position, mixed widths
   included. The rest of the draw API is `tandem::Rng`'s, shared through `Draws<D>` in
-  `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`
-  and `normalf()` by Box-Muller (`normalf` in float from two f32 uniforms), `at_urand/urand64/frand/drand(i)`, `child`, `split`, `sub` and `fork`.
+  `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`/`normal2()`
+  and `normalf()`/`normalf2()` by Box-Muller (the `f` forms in float from two f32 uniforms), `at_urand/urand64/frand/drand(i)`, `child`, `split`, `sub` and `fork`.
   Bounded draws and normals are not part of the specification. They match `tandem_u32_below`,
   `tandem_u64_below` and `tandem_normal_f64` of the C library.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
@@ -47,25 +48,30 @@ It produces the stream the specification defines, bit for bit.
 ## Bounded and normal fills
 
 These fills are not part of the specification. Other ports should follow the same contract,
-and the C library's `tandem_fill_u32_below`, `tandem_fill_u64_below` and
-`tandem_fill_normal_f64` do, up to the rare case below.
+and the C library's `tandem_fill_u32_below` and `tandem_fill_u64_below` do, up to the rare case
+below.
 
-**Normals.** Element `i` is Box-Muller of the Float64 draws `2i` and `2i + 1` of the Float64
-fill that starts at the same position: `u = 1 - d[2i]`, `v = d[2i + 1]`,
-`sqrt(-2 ln u) cos(2 pi v)`. The fill starts at `pos` aligned up to 64 bits, consumes `128 n`
-bits and returns that position, so it equals `n` calls of `Rng::normal()`. A start at an odd
-Float64 draw makes every element span two blocks, and the kernel steps a second chunk per
-thread to read them, at about 80% of the speed. The device `log` and `cos` can differ from the
-host's in the last bits, so f64 normals agree across hosts and devices to about 1e-15 relative.
+**Normals.** One Box-Muller step turns two uniforms `a`, `b` into two normals,
+`r = sqrt(-2 ln(1 - a))`, `z0 = r cos(2 pi b)`, `z1 = r sin(2 pi b)`. `Rng::normal2()` returns
+the pair `(z0, z1)`, `Rng::normal()` its first half, and both consume two Float64 uniforms. A
+fill of `n` normals is the flattened sequence of `normal2` calls: pair `j`, the elements `2j` and
+`2j + 1`, comes from the Float64 draws `2j` and `2j + 1` of the Float64 fill that starts at the
+same position. The fill starts at `pos` aligned up to 64 bits and consumes `2 ceil(n / 2)`
+draws, so an odd `n` uses the cos half of its last pair and still advances past both draws. A
+start at an odd Float64 draw makes every pair span two blocks, and the kernel steps a second
+chunk per thread to read them, at about 80% of the speed. On a device the angle goes through
+`sincospi(2b)`, on a host through `cos` and `sin`, and `log` differs in the last bits, so f64
+normals agree across platforms to about 1e-15 relative, not bit for bit.
 
-**Float normals.** `fill_normal_f32` is `Rng::normalf()`: element `i` is Box-Muller in float of
-the Float32 draws `2i` and `2i + 1` of the Float32 fill that starts at the same position,
-`sqrt(-2 ln u) cos(2 pi v)` with `u = 1 - d[2i]`, `v = d[2i + 1]`, all in `float` with the precise
-`logf`, `cosf` and `sqrtf`. The fill starts at `pos` aligned up to 32 bits and consumes `64 n`
-bits, so a block holds two elements and a start at an odd Float32 draw makes some span two
-blocks. It does not round the f64 normal. Float normals agree across ports and devices to a few
-ulps, not bit for bit, because libm float functions differ. The uniforms are exact.
-Everything else in this library is bit for bit.
+**Float normals.** `fill_normal_f32` and `Rng::normalf2()` are the same on Float32 draws, in
+float: `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf`, `sqrtf` and `sincospif`, no fast-math
+intrinsics. The fill starts at `pos` aligned up to 32 bits and consumes `64 ceil(n / 2)` bits, so
+a block holds two pairs and a start at an odd Float32 draw makes some span two blocks. It does
+not round the f64 normal. Float normals agree across ports and devices to a few ulps, not bit for
+bit, because libm float functions differ. The host version of the f32 step takes its angle in
+double and rounds the results, because a float angle `2 pi b` is off by up to `2 pi b 2^-24`
+where `sincospif` is not. The uniforms are exact, and everything else in this library is bit for
+bit. `tests/cross_fill_normal.h` holds normal fixtures for ports at even and odd starts.
 
 **Bounded integers.** Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
 Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
@@ -130,9 +136,9 @@ generator, with bounded draws at small and at rejecting ranges, normals, `at_*`,
 `split` and `sub`, is compared with the C library, normals to 1e-12 and the rest bit for
 bit. Bounded fills are compared at ranges that reject often, rarely and never, against a
 reference of the contract above written on the C library's generators, and, where nothing
-rejects, against the sequential C bounded draws. The f64 normal fill is compared with the C
-fill at even and odd Float64 starts, the f32 one with a float reference on the C Float32 draws
-at every start slot, to 4 ulps. A generator is checked by running mixed fills of every width through it and through the C
+rejects, against the sequential C bounded draws. Normal fills are compared with the host Box-Muller step on the C library's uniform fills, at
+every start slot, odd and even `n`, to 1e-12 (f64) and 4 ulps (f32), and with
+`tests/cross_fill_normal.h`. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `pixi.toml` provides a CUDA
@@ -142,7 +148,7 @@ returned positions. `pixi.toml` provides a CUDA
 
 NVIDIA A100 40 GB (PCIe), CUDA 12.8, `make bench`: 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
-the run. Consecutive runs agreed within 1%, except `fill_normal_f64` within 4%. The elements are
+the run. Consecutive runs agreed within 1%, except the normal rows within 4%. The elements are
 2^28 of each type, so the rows for narrow types write fewer bytes.
 
 | | GiB/s written |
@@ -161,14 +167,14 @@ the run. Consecutive runs agreed within 1%, except `fill_normal_f64` within 4%. 
 | `tandem::fill_bool` (one byte per bit) | 1227 |
 | `tandem::fill_u32_below(1000)` | 1336 |
 | `tandem::fill_u64_below(1000)` | 1348 |
-| `tandem::fill_normal_f64` | 405 |
-| `tandem::fill_normal_f64`, start at an odd Float64 draw | 348 |
-| `tandem::fill_normal_f32` | 540 |
+| `tandem::fill_normal_f64` | 742 |
+| `tandem::fill_normal_f64`, start at an odd Float64 draw | 611 |
+| `tandem::fill_normal_f32` | 709 |
 | cuRAND Philox4x32-10 `curandGenerate` | 1332 |
 | cuRAND Philox4x32-10 `curandGenerateUniform` | 1307 |
 | cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 781 |
-| cuRAND Philox4x32-10 `curandGenerateNormal` | 977 |
-| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 597 |
+| cuRAND Philox4x32-10 `curandGenerateNormal` | 956 |
+| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 583 |
 
 The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
 as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.
@@ -177,8 +183,8 @@ cover one 128-byte line per step. Both kernels pick a 16-byte vector store at co
 when the output's blocks are 16-byte aligned. The bool fill expands each bit to a byte, so it
 stages one step of 32 groups (32 KiB) and writes 1024 contiguous bytes per group. The bounded
 fills run at the fill speed, because a rejection is rare and its retry runs out of line. The
-normal fills are limited by `log`, `cos` and `sqrt`: double precision for `fill_normal_f64`, about
-54 billion elements per second, and float for `fill_normal_f32`, about 70 billion.
+normal fills write both halves of each step and are limited by `log`, `sincospi` and `sqrt`, in double
+for `fill_normal_f64` and in float for `fill_normal_f32`.
 
 ## AI assistance
 

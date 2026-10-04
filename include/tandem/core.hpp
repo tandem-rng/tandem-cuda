@@ -330,6 +330,39 @@ TANDEM_FN double box_muller(double a, double b) {
     return std::sqrt(-2.0 * std::log(1.0 - a)) * std::cos(6.283185307179586 * b);
 }
 
+/* Both halves of one Box-Muller step: z0 = r cos(2 pi b), z1 = r sin(2 pi b), with
+ * r = sqrt(-2 log(1 - a)). z0 is box_muller(a, b). On a device the angle goes through the
+ * precise sincospi(2 b), which needs no range reduction, on a host through cos and sin, so
+ * the halves agree across platforms to a few ulps, not bit for bit. */
+template <class T> struct Pair2 {
+    T z0, z1;
+};
+
+TANDEM_FN Pair2<double> box_muller2(double a, double b) {
+    double r = std::sqrt(-2.0 * std::log(1.0 - a)), s, c;
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    sincospi(2.0 * b, &s, &c);
+#else
+    c = std::cos(6.283185307179586 * b);
+    s = std::sin(6.283185307179586 * b);
+#endif
+    return Pair2<double>{r * c, r * s};
+}
+
+TANDEM_FN Pair2<float> box_muller2_f32(float a, float b) {
+    float r = std::sqrt(-2.0f * std::log(1.0f - a)), s, c;
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    sincospif(2.0f * b, &s, &c);
+#else
+    /* A float angle 2 pi b is off by up to 2 pi b 2^-24, which sincospif does not suffer, so
+     * the host takes the angle in double and rounds the results. */
+    double ang = 6.283185307179586 * (double)b;
+    c = (float)std::cos(ang);
+    s = (float)std::sin(ang);
+#endif
+    return Pair2<float>{r * c, r * s};
+}
+
 TANDEM_FN bool operator==(const Key &a, const Key &b) {
     return a.w[0] == b.w[0] && a.w[1] == b.w[1] && a.w[2] == b.w[2] && a.w[3] == b.w[3];
 }
@@ -481,6 +514,16 @@ template <class D> class Draws {
     TANDEM_FN float normalf() {
         float a = frand();
         return box_muller_f32(a, frand());
+    }
+    /* The pair of a Box-Muller step from two uniforms, cos half first. normal() and normalf()
+     * are its first half, and a normal fill equals the flattened sequence of these calls. */
+    TANDEM_FN Pair2<double> normal2() {
+        double a = drand();
+        return box_muller2(a, drand());
+    }
+    TANDEM_FN Pair2<float> normalf2() {
+        float a = frand();
+        return box_muller2_f32(a, frand());
     }
     TANDEM_FN double normal(double mean, double std_dev = 1.0) { return mean + std_dev * normal(); }
 
