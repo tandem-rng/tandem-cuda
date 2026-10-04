@@ -62,13 +62,13 @@ int main() {
     }
     std::printf("%-34s %10s\n", "", "GiB/s");
     std::printf("%-34s %10.0f\n", "tandem fill_u32, direct kernel",
-                best_gibs(N * 4, [&] { tandem::detail::fill(key, 0, 32u, u32, N, 0, false); }));
+                best_gibs(N * 4, [&] { tandem::detail::fill<uint32_t>(key, 0, 32u, u32, N, 0, false); }));
     std::printf("%-34s %10.0f\n", "tandem fill_u64, direct kernel",
-                best_gibs(N * 8, [&] { tandem::detail::fill(key, 0, 32u, u64, N, 0, false); }));
+                best_gibs(N * 8, [&] { tandem::detail::fill<uint64_t>(key, 0, 32u, u64, N, 0, false); }));
     std::printf("%-34s %10.0f\n", "tandem fill_f32, direct kernel",
-                best_gibs(N * 4, [&] { tandem::detail::fill(key, 0, 32u, f32, N, 0, false); }));
+                best_gibs(N * 4, [&] { tandem::detail::fill<float>(key, 0, 32u, f32, N, 0, false); }));
     std::printf("%-34s %10.0f\n", "tandem fill_f64, direct kernel",
-                best_gibs(N * 8, [&] { tandem::detail::fill(key, 0, 32u, f64, N, 0, false); }));
+                best_gibs(N * 8, [&] { tandem::detail::fill<double>(key, 0, 32u, f64, N, 0, false); }));
     std::printf("%-34s %10.0f\n", "tandem fill_u32, tile kernel",
                 best_gibs(N * 4, [&] { tandem::fill_u32(key, 0, 32, u32, N); }));
     std::printf("%-34s %10.0f\n", "tandem fill_u64, tile kernel",
@@ -77,6 +77,18 @@ int main() {
                 best_gibs(N * 4, [&] { tandem::fill_f32(key, 0, 32, f32, N); }));
     std::printf("%-34s %10.0f\n", "tandem fill_f64, tile kernel",
                 best_gibs(N * 8, [&] { tandem::fill_f64(key, 0, 32, f64, N); }));
+
+    auto u16 = static_cast<uint16_t *>(buf);
+    auto u8 = static_cast<uint8_t *>(buf);
+    auto b8 = static_cast<bool *>(buf);
+    std::printf("%-34s %10.0f\n", "tandem fill_u16, tile kernel",
+                best_gibs(N * 2, [&] { tandem::fill_u16(key, 0, 32, u16, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_f16_bits, tile kernel",
+                best_gibs(N * 2, [&] { tandem::fill_f16_bits(key, 0, 32, u16, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_u8, tile kernel",
+                best_gibs(N, [&] { tandem::fill_u8(key, 0, 32, u8, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_bool, shared-mem kernel",
+                best_gibs(N, [&] { tandem::fill_bool(key, 0, 32, b8, N); }));
 
     curandGenerator_t g;
     curandCreateGenerator(&g, CURAND_RNG_PSEUDO_PHILOX4_32_10);

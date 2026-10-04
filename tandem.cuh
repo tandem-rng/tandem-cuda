@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include <cuda_runtime.h>
 
@@ -82,32 +83,66 @@ struct device_rng {
 
 namespace detail {
 
-/* How an output type is made from the words of a block. */
+/* Kinds that share an output type with another kind. */
+struct bool_bits {}; /* one stream bit per bool, stored as a byte */
+struct f16_bits {};  /* binary16 bit patterns, stored as uint16_t */
+
+/* How an output element is made from the four words of a block. `i` is the element's index in
+ * the block, `bits` its width in the stream. */
 template <class E> struct elem;
 
 template <> struct elem<uint32_t> {
+    using out_t = uint32_t;
     static constexpr unsigned bits = 32;
-    __device__ static uint32_t make(uint32_t lo, uint32_t) { return lo; }
+    __device__ static out_t make(const uint32_t w[4], unsigned i) { return w[i]; }
 };
 template <> struct elem<float> {
+    using out_t = float;
     static constexpr unsigned bits = 32;
-    __device__ static float make(uint32_t lo, uint32_t) { return to_f32(lo); }
+    __device__ static out_t make(const uint32_t w[4], unsigned i) { return to_f32(w[i]); }
 };
 template <> struct elem<uint64_t> {
+    using out_t = uint64_t;
     static constexpr unsigned bits = 64;
-    __device__ static uint64_t make(uint32_t lo, uint32_t hi) {
-        return lo | ((uint64_t)hi << 32);
+    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+        return w[2 * i] | ((uint64_t)w[2 * i + 1] << 32);
     }
 };
 template <> struct elem<double> {
+    using out_t = double;
     static constexpr unsigned bits = 64;
-    __device__ static double make(uint32_t lo, uint32_t hi) {
-        return to_f64(lo | ((uint64_t)hi << 32));
+    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+        return to_f64(w[2 * i] | ((uint64_t)w[2 * i + 1] << 32));
     }
 };
+template <> struct elem<uint16_t> {
+    using out_t = uint16_t;
+    static constexpr unsigned bits = 16;
+    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+        return (uint16_t)(w[i >> 1] >> ((i & 1u) * 16u));
+    }
+};
+template <> struct elem<f16_bits> {
+    using out_t = uint16_t;
+    static constexpr unsigned bits = 16;
+    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+        return to_f16_bits(elem<uint16_t>::make(w, i));
+    }
+};
+template <> struct elem<uint8_t> {
+    using out_t = uint8_t;
+    static constexpr unsigned bits = 8;
+    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+        return (uint8_t)(w[i >> 2] >> ((i & 3u) * 8u));
+    }
+};
+template <> struct elem<bool_bits> {
+    using out_t = bool;
+    static constexpr unsigned bits = 1;
+};
 
-template <class E> struct vec4;
-template <> struct vec4<uint32_t> { using type = uint4; };
+/* The vector type that stores 16 bytes of output. */
+template <class E> struct vec4 { using type = uint4; };
 template <> struct vec4<float> { using type = float4; };
 template <> struct vec4<uint64_t> { using type = ulonglong2; };
 template <> struct vec4<double> { using type = double2; };
@@ -116,13 +151,13 @@ template <> struct vec4<double> { using type = double2; };
  * of the block in the stream, `b0` and `b1` bound the output's bytes. With ALIGNED the
  * output's blocks sit at 16-byte addresses, and a block fully inside is one vector store. */
 template <class E, bool ALIGNED>
-__device__ __forceinline__ void store_block(E *out, uint64_t b0, uint64_t b1, uint64_t first,
-                                            const uint32_t w[4]) {
+__device__ __forceinline__ void store_block(typename elem<E>::out_t *out, uint64_t b0,
+                                            uint64_t b1, uint64_t first, const uint32_t w[4]) {
+    using out_t = typename elem<E>::out_t;
     constexpr unsigned size = elem<E>::bits / 8;
     constexpr unsigned per_block = 16 / size;
-    E v[per_block];
-    for (unsigned i = 0; i < per_block; i++)
-        v[i] = elem<E>::make(w[i * (size / 4)], w[i * (size / 4) + (size / 4) - 1]);
+    out_t v[per_block];
+    for (unsigned i = 0; i < per_block; i++) v[i] = elem<E>::make(w, i);
     char *dst = reinterpret_cast<char *>(out) + (first - b0);
     if (ALIGNED && first >= b0 && first + 16 <= b1) {
         *reinterpret_cast<typename vec4<E>::type *>(dst) =
@@ -131,7 +166,7 @@ __device__ __forceinline__ void store_block(E *out, uint64_t b0, uint64_t b1, ui
     }
     for (unsigned i = 0; i < per_block; i++) {
         uint64_t at = first + i * size;
-        if (at >= b0 && at + size <= b1) reinterpret_cast<E *>(dst)[i] = v[i];
+        if (at >= b0 && at + size <= b1) reinterpret_cast<out_t *>(dst)[i] = v[i];
     }
 }
 
@@ -144,7 +179,7 @@ constexpr unsigned TILE_STEPS = 8;
 template <class E, bool ALIGNED>
 __global__ void fill_rows_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3,
                                  uint32_t K, uint64_t g0, uint64_t r0, uint64_t r1, uint64_t b0,
-                                 uint64_t b1, E *out) {
+                                 uint64_t b1, typename elem<E>::out_t *out) {
     uint64_t c = 8u * g0 + blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
     uint64_t g = c >> 3, lane = c & 7u;
     if (g > r1 / K) return;
@@ -167,7 +202,8 @@ __global__ void fill_rows_kernel(uint32_t key0, uint32_t key1, uint32_t key2, ui
 template <class E, bool ALIGNED>
 __global__ void __launch_bounds__(THREADS)
     fill_tile_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3, uint32_t K,
-                     uint64_t g0, uint64_t r1, uint64_t b0, uint64_t b1, E *out) {
+                     uint64_t g0, uint64_t r1, uint64_t b0, uint64_t b1,
+                     typename elem<E>::out_t *out) {
     constexpr unsigned GROUPS = THREADS / 8, SLOTS = GROUPS * TILE_STEPS * 8;
     __shared__ uint4 tile[SLOTS];
     uint64_t gb = g0 + blockIdx.x * (uint64_t)GROUPS; /* first group of this block */
@@ -199,23 +235,82 @@ __global__ void __launch_bounds__(THREADS)
     }
 }
 
+/* Bool fill: one stream bit becomes one output byte, so a block of 128 bits is 128 bytes and
+ * a row is 1024 contiguous bytes. One thread per chunk, 32 groups per block, one step at a
+ * time through shared memory, so each warp writes whole 16-byte slots in stream order. A
+ * thread's eight slots are rotated by its lane, which keeps the shared stores free of bank
+ * conflicts. `p0` and `p1` bound the output in stream bits, which are also output bytes. */
+template <bool ALIGNED>
+__global__ void __launch_bounds__(THREADS)
+    fill_bool_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3, uint32_t K,
+                     uint64_t g0, uint64_t r1, uint64_t p0, uint64_t p1, bool *out) {
+    constexpr unsigned GROUPS = THREADS / 8, SLOTS = GROUPS * 64;
+    __shared__ uint4 tile[SLOTS];
+    uint64_t gb = g0 + blockIdx.x * (uint64_t)GROUPS;
+    unsigned gi = threadIdx.x >> 3, lane = threadIdx.x & 7u;
+    uint64_t c = 8u * (gb + gi) + lane;
+    bool mine = gb + gi <= r1 / K;
+    const uint32_t key[4] = {key0, key1, key2, key3};
+    uint32_t o[4], h[4];
+    F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
+    for (uint32_t j = 0; j < K; j++) {
+        if ((gb * K + j) * 1024u >= p1) break;
+        T(o, h);
+        if (mine) {
+            for (unsigned s = 0; s < 8; s++) {
+                uint32_t x = o[s >> 1] >> ((s & 1u) * 16u), y[4];
+                /* Spread four bits over four bytes. */
+                for (unsigned t = 0; t < 4; t++) y[t] = (((x >> (4 * t)) & 0xfu) * 0x00204081u) & 0x01010101u;
+                tile[threadIdx.x * 8 + ((s + lane) & 7u)] = make_uint4(y[0], y[1], y[2], y[3]);
+            }
+        }
+        __syncthreads();
+        for (unsigned s = threadIdx.x; s < SLOTS; s += THREADS) {
+            unsigned sg = s >> 6, within = s & 63u;
+            uint64_t q = ((gb + sg) * K + j) * 1024u + within * 16u;
+            if (q >= p1 || q + 16u <= p0) continue;
+            uint4 v = tile[(s & ~7u) + (((s & 7u) + (within >> 3)) & 7u)];
+            bool *dst = out + (q - p0);
+            if (ALIGNED && q >= p0 && q + 16u <= p1) {
+                *reinterpret_cast<uint4 *>(dst) = v;
+            } else {
+                const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&v);
+                for (unsigned k = 0; k < 16; k++)
+                    if (q + k >= p0 && q + k < p1) dst[k] = bytes[k];
+            }
+        }
+        __syncthreads();
+    }
+}
+
 /* `tile` selects the shared-memory kernel where K allows; the tests and the bench also run
  * the direct kernel at every K. */
 template <class E>
-inline uint64_t fill(const uint32_t key[4], uint64_t pos, uint32_t K, E *out, size_t n,
-                     cudaStream_t stream, bool tile = true) {
+inline uint64_t fill(const uint32_t key[4], uint64_t pos, uint32_t K,
+                     typename elem<E>::out_t *out, size_t n, cudaStream_t stream,
+                     bool tile = true) {
     constexpr unsigned bits = elem<E>::bits;
     K = K ? K : DEFAULT_K;
     uint64_t p0 = align_pos(pos, bits), p1 = p0 + (uint64_t)n * bits;
     if (n == 0) return p1;
     uint64_t r0 = p0 >> 10, r1 = (p1 - 1) >> 10;
     uint64_t g0 = r0 / K, g1 = r1 / K;
+    constexpr bool is_bool = std::is_same<E, bool_bits>::value;
     uint64_t b0 = p0 / 8, b1 = p1 / 8;
     /* Blocks land on 16-byte addresses when the output's first byte and the fill's first
-     * stream byte agree modulo 16. */
-    bool aligned = ((reinterpret_cast<uintptr_t>(out) - b0) & 15u) == 0;
+     * stream byte agree modulo 16. A bool output byte is one stream bit. */
+    bool aligned = ((reinterpret_cast<uintptr_t>(out) - (is_bool ? p0 : b0)) & 15u) == 0;
     uint64_t groups = g1 - g0 + 1u;
-    if (tile && K >= TILE_STEPS) {
+    if constexpr (is_bool) {
+        unsigned blocks = (unsigned)((groups + THREADS / 8 - 1) / (THREADS / 8));
+        if (aligned)
+            fill_bool_kernel<true><<<blocks, THREADS, 0, stream>>>(
+                key[0], key[1], key[2], key[3], K, g0, r1, p0, p1, out);
+        else
+            fill_bool_kernel<false><<<blocks, THREADS, 0, stream>>>(
+                key[0], key[1], key[2], key[3], K, g0, r1, p0, p1, out);
+        return p1;
+    } else if (tile && K >= TILE_STEPS) {
         unsigned blocks = (unsigned)((groups + THREADS / 8 - 1) / (THREADS / 8));
         if (aligned)
             fill_tile_kernel<E, true><<<blocks, THREADS, 0, stream>>>(
@@ -241,19 +336,54 @@ inline uint64_t fill(const uint32_t key[4], uint64_t pos, uint32_t K, E *out, si
  * the C library's tandem_fill_* would. Return the position after the fill. */
 inline uint64_t fill_u32(const uint32_t key[4], uint64_t pos, uint32_t K, uint32_t *out,
                          size_t n, cudaStream_t stream = 0) {
-    return detail::fill(key, pos, K, out, n, stream);
+    return detail::fill<uint32_t>(key, pos, K, out, n, stream);
 }
 inline uint64_t fill_u64(const uint32_t key[4], uint64_t pos, uint32_t K, uint64_t *out,
                          size_t n, cudaStream_t stream = 0) {
-    return detail::fill(key, pos, K, out, n, stream);
+    return detail::fill<uint64_t>(key, pos, K, out, n, stream);
 }
 inline uint64_t fill_f32(const uint32_t key[4], uint64_t pos, uint32_t K, float *out, size_t n,
                          cudaStream_t stream = 0) {
-    return detail::fill(key, pos, K, out, n, stream);
+    return detail::fill<float>(key, pos, K, out, n, stream);
 }
 inline uint64_t fill_f64(const uint32_t key[4], uint64_t pos, uint32_t K, double *out,
                          size_t n, cudaStream_t stream = 0) {
-    return detail::fill(key, pos, K, out, n, stream);
+    return detail::fill<double>(key, pos, K, out, n, stream);
+}
+/* One stream bit per element. Each bool is stored as one byte, 0 or 1. */
+inline uint64_t fill_bool(const uint32_t key[4], uint64_t pos, uint32_t K, bool *out, size_t n,
+                          cudaStream_t stream = 0) {
+    return detail::fill<detail::bool_bits>(key, pos, K, out, n, stream);
+}
+inline uint64_t fill_u8(const uint32_t key[4], uint64_t pos, uint32_t K, uint8_t *out, size_t n,
+                        cudaStream_t stream = 0) {
+    return detail::fill<uint8_t>(key, pos, K, out, n, stream);
+}
+inline uint64_t fill_u16(const uint32_t key[4], uint64_t pos, uint32_t K, uint16_t *out,
+                         size_t n, cudaStream_t stream = 0) {
+    return detail::fill<uint16_t>(key, pos, K, out, n, stream);
+}
+/* binary16 bit patterns of the specification's Float16 draws, (raw >> 5) * 2^-11. */
+inline uint64_t fill_f16_bits(const uint32_t key[4], uint64_t pos, uint32_t K, uint16_t *out,
+                              size_t n, cudaStream_t stream = 0) {
+    return detail::fill<detail::f16_bits>(key, pos, K, out, n, stream);
+}
+/* Signed integers reinterpret the unsigned draw of the same width in two's complement. */
+inline uint64_t fill_i8(const uint32_t key[4], uint64_t pos, uint32_t K, int8_t *out, size_t n,
+                        cudaStream_t stream = 0) {
+    return fill_u8(key, pos, K, reinterpret_cast<uint8_t *>(out), n, stream);
+}
+inline uint64_t fill_i16(const uint32_t key[4], uint64_t pos, uint32_t K, int16_t *out,
+                         size_t n, cudaStream_t stream = 0) {
+    return fill_u16(key, pos, K, reinterpret_cast<uint16_t *>(out), n, stream);
+}
+inline uint64_t fill_i32(const uint32_t key[4], uint64_t pos, uint32_t K, int32_t *out,
+                         size_t n, cudaStream_t stream = 0) {
+    return fill_u32(key, pos, K, reinterpret_cast<uint32_t *>(out), n, stream);
+}
+inline uint64_t fill_i64(const uint32_t key[4], uint64_t pos, uint32_t K, int64_t *out,
+                         size_t n, cudaStream_t stream = 0) {
+    return fill_u64(key, pos, K, reinterpret_cast<uint64_t *>(out), n, stream);
 }
 
 } // namespace tandem

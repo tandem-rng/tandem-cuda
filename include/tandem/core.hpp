@@ -116,6 +116,20 @@ TANDEM_FN uint32_t step_of(uint64_t p, uint32_t K) { return (uint32_t)((p >> 10)
 TANDEM_FN double to_f64(uint64_t raw) { return (double)(raw >> 11) * 0x1p-53; }
 TANDEM_FN float to_f32(uint32_t raw) { return (float)(raw >> 8) * 0x1p-24f; }
 
+/* (raw >> 5) * 2^-11 as binary16 bits. Every such value is zero or a normal half whose
+ * significand is the 11-bit integer k = raw >> 5, so the encoding is exact. The binary32
+ * of k is exact too and carries the same significand and exponent m, which gives the half's
+ * exponent m + 4 after rebiasing, without a loop. */
+TANDEM_FN uint16_t to_f16_bits(uint16_t raw) {
+    uint32_t k = raw >> 5;
+    if (k == 0)
+        return 0;
+    float f = (float)k;
+    uint32_t b;
+    std::memcpy(&b, &f, sizeof b);
+    return (uint16_t)((b >> 13) - (123u << 10));
+}
+
 /* High word of a 64 x 64-bit product, from 32-bit halves. */
 TANDEM_FN uint64_t mulhi64(uint64_t a, uint64_t b) {
     uint64_t a0 = (uint32_t)a, a1 = a >> 32, b0 = (uint32_t)b, b1 = b >> 32;
