@@ -129,6 +129,13 @@ decomposition, as
 [Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative)
 of the specification shows.
 
+## Install
+
+The library is headers, so copy `tandem.cuh` and `include/tandem/` or put them on the include path. The
+`packaging/` directory holds a Spack recipe (`spack/package.py`) and a conda-forge style recipe
+(`conda/recipe.yaml`) that install both. Neither is submitted to Spack or conda-forge yet, and both
+build from the `main` branch.
+
 ## Tests
 
 GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80` and checks

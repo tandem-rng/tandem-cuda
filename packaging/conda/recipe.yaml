@@ -1,0 +1,51 @@
+# conda-forge style recipe in the rattler-build v1 format. It is not submitted yet.
+context:
+  version: "0.1.0"
+
+package:
+  name: tandem-cuda
+  version: ${{ version }}
+
+# No releases exist, so the source is the main branch. At release time replace it with
+#   url: https://github.com/tandem-rng/tandem-cuda/archive/refs/tags/v${{ version }}.tar.gz
+#   sha256: <sha256 of that tarball>
+source:
+  git: https://github.com/tandem-rng/tandem-cuda.git
+  branch: main
+
+build:
+  number: 0
+  # tandem.cuh includes cuda_runtime.h, which conda-forge ships for linux and win only.
+  skip: osx
+
+# Headers only. The consumer's nvcc compiles them. include/tandem/core.hpp alone is plain
+# C++17 and needs no CUDA.
+requirements:
+  host:
+    - cuda-version >=12.8
+  run:
+    - cuda-cudart-dev
+    - cuda-version >=12.8
+
+tests:
+  - package_contents:
+      include:
+        - tandem.cuh
+        - tandem/core.hpp
+  # Compiles the portable core with the host compiler. Compiling tandem.cuh needs nvcc and
+  # a GPU runs the result, so CI covers that.
+  - script:
+      - printf '#include <tandem/core.hpp>\nint main(){tandem::Rng r(42, 0, 32); return r.urand(1000u) >= 1000u;}\n' > t.cpp
+      - $CXX -std=c++17 -I$PREFIX/include t.cpp -o t
+      - ./t
+    requirements:
+      run:
+        - ${{ compiler('cxx') }}
+
+about:
+  homepage: https://github.com/tandem-rng/tandem-cuda
+  license: Apache-2.0
+  license_file:
+    - LICENSE
+    - NOTICE
+  summary: Header-only Tandem8x32 random number generator for CUDA
