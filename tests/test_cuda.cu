@@ -396,6 +396,148 @@ static void test_device_api() {
     check_device_api(key, 4097, 1, 0x80000001u, 0x8000000000000001ull);
 }
 
+// ---- Bounded and normal fills -----------------------------------------------------------------
+
+// Without a rejection a bounded fill equals the sequential C calls. With one, it follows the
+// contract in core.hpp, written out again here on the C library's own generators.
+static uint32_t ref_below32(const tandem_rng *root, uint32_t u, uint32_t range, uint64_t e) {
+    uint64_t m = (uint64_t)u * range;
+    if ((uint32_t)m < range) {
+        uint32_t t = (0u - range) % range;
+        if ((uint32_t)m < t) {
+            tandem_rng sb = tandem_sub(root, 0x424c573332ull), f = tandem_split(&sb, e);
+            do m = (uint64_t)tandem_next_u32(&f) * range; while ((uint32_t)m < t);
+        }
+    }
+    return (uint32_t)(m >> 32);
+}
+
+static uint64_t ref_below64(const tandem_rng *root, uint64_t x, uint64_t range, uint64_t e) {
+    unsigned __int128 m = (unsigned __int128)x * range;
+    if ((uint64_t)m < range) {
+        uint64_t t = (0u - range) % range;
+        if ((uint64_t)m < t) {
+            tandem_rng sb = tandem_sub(root, 0x424c573634ull), f = tandem_split(&sb, e);
+            do m = (unsigned __int128)tandem_next_u64(&f) * range; while ((uint64_t)m < t);
+        }
+    }
+    return (uint64_t)(m >> 64);
+}
+
+template <class T, class Launch, class Ref>
+static void check_below(std::mt19937_64 &gen, const char *label, T range, Launch launch,
+                        Ref ref, void (*cfill)(tandem_rng *, T *, size_t)) {
+    constexpr unsigned bits = sizeof(T) * 8;
+    for (int trial = 0; trial < 12; trial++) {
+        uint32_t key[4];
+        for (auto &w : key) w = (uint32_t)gen();
+        uint32_t K = 1u << (gen() % 8);
+        uint64_t pos = gen() % (1u << 20);
+        size_t n = (size_t)(gen() % 30000);
+        tandem_rng root = tandem_from_key(key, 0, K), c = tandem_from_key(key, pos, K);
+        std::vector<T> raw(n), want(n);
+        cfill(&c, raw.data(), n);
+        for (size_t e = 0; e < n; e++) want[e] = ref(&root, raw[e], range, e);
+        dev<T> d(n + 2);
+        uint64_t end = launch(key, pos, K, range, d.p, n);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<T> got = d.host();
+        got.resize(n);
+        CHECK(end == tandem::align_pos(pos, bits) + (uint64_t)n * bits);
+        if (got != want) {
+            size_t i = 0;
+            while (i < n && got[i] == want[i]) i++;
+            std::printf("FAIL %s below(%llu) trial %d (K=%u pos=%llu n=%zu) element %zu\n", label,
+                        (unsigned long long)range, trial, K, (unsigned long long)pos, n, i);
+            failures++;
+        }
+    }
+}
+
+// The same fill where no draw rejects must also equal the sequential C bounded draws.
+template <class T, class Launch, T (*cbelow)(tandem_rng *, T)>
+static void check_below_sequential(std::mt19937_64 &gen, const char *label, T range,
+                                   Launch launch) {
+    for (int trial = 0; trial < 12; trial++) {
+        uint32_t key[4];
+        for (auto &w : key) w = (uint32_t)gen();
+        uint32_t K = 1u << (gen() % 8);
+        uint64_t pos = (gen() % (1u << 20)) & ~(uint64_t)63;
+        size_t n = (size_t)(gen() % 30000);
+        tandem_rng c = tandem_from_key(key, pos, K);
+        std::vector<T> want(n);
+        for (auto &v : want) v = cbelow(&c, range);
+        dev<T> d(n + 2);
+        launch(key, pos, K, range, d.p, n);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<T> got = d.host();
+        got.resize(n);
+        if (got != want) {
+            std::printf("FAIL %s below(%llu) vs sequential C, trial %d\n", label,
+                        (unsigned long long)range, trial);
+            failures++;
+        }
+    }
+}
+
+static void test_below() {
+    std::mt19937_64 gen(5150);
+    auto l32 = [](const uint32_t *k, uint64_t p, uint32_t K, uint32_t r, uint32_t *o, size_t n) {
+        return tandem::fill_u32_below(k, p, K, r, o, n);
+    };
+    auto l64 = [](const uint32_t *k, uint64_t p, uint32_t K, uint64_t r, uint64_t *o, size_t n) {
+        return tandem::fill_u64_below(k, p, K, r, o, n);
+    };
+    // Ranges that reject often, rarely, and never (powers of two), and the full range.
+    for (uint32_t r : {1u, 2u, 6u, 1000u, 65537u, 1u << 20, 3000000000u, 0x80000001u, 0xffffffffu})
+        check_below<uint32_t>(gen, "u32", r, l32, ref_below32, tandem_fill_u32);
+    for (uint64_t r : {1ull, 6ull, 1000000007ull, 1ull << 40, 0xc000000000003039ull,
+                       0x8000000000000001ull, ~0ull})
+        check_below<uint64_t>(gen, "u64", r, l64, ref_below64, tandem_fill_u64);
+    for (uint32_t r : {1u, 2u, 6u, 1000u, 1u << 20})
+        check_below_sequential<uint32_t, decltype(l32), tandem_u32_below>(gen, "u32", r, l32);
+    for (uint64_t r : {1ull, 6ull, 1000000007ull, 1ull << 40})
+        check_below_sequential<uint64_t, decltype(l64), tandem_u64_below>(gen, "u64", r, l64);
+}
+
+// Normals equal the C fill, including starts at an odd 64-bit draw, where each element spans two
+// blocks. The device log and cos differ from the host's by a few ulp.
+template <class T, void (*cfill)(tandem_rng *, T *, size_t),
+          uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
+static void check_normal(std::mt19937_64 &gen, const char *label, double tol) {
+    for (int trial = 0; trial < 40; trial++) {
+        uint32_t key[4];
+        for (auto &w : key) w = (uint32_t)gen();
+        uint32_t K = 1u << (gen() % 8);
+        uint64_t pos = gen() % (1u << 20);
+        if (trial % 2) pos |= 64; // an odd Float64 draw
+        size_t n = (size_t)(gen() % (trial < 30 ? 3000 : 100000));
+        tandem_rng c = tandem_from_key(key, pos, K);
+        std::vector<T> want(n);
+        cfill(&c, want.data(), n);
+        dev<T> d(n + 2);
+        uint64_t end = launch(key, pos, K, d.p, n, 0);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<T> got = d.host();
+        CHECK(end == tandem::align_pos(pos, 64) + (uint64_t)n * 128u);
+        size_t bad = 0;
+        for (size_t i = 0; i < n; i++)
+            bad += !(std::fabs((double)got[i] - (double)want[i]) <=
+                     tol * (1.0 + std::fabs((double)want[i])));
+        if (bad) {
+            std::printf("FAIL %s normal fill: %zu elements differ (trial %d K=%u pos=%llu n=%zu)\n",
+                        label, bad, trial, K, (unsigned long long)pos, n);
+            failures++;
+        }
+    }
+}
+
+static void test_normal() {
+    std::mt19937_64 gen(8675);
+    check_normal<double, tandem_fill_normal_f64, tandem::fill_normal_f64>(gen, "f64", 1e-12);
+    check_normal<float, tandem_fill_normal_f32, tandem::fill_normal_f32>(gen, "f32", 1e-6);
+}
+
 // A signed fill is the unsigned fill of the same width read in two's complement, and it returns
 // the same position.
 template <class S, class U, uint64_t (*sfill)(const uint32_t *, uint64_t, uint32_t, S *, size_t, cudaStream_t),
@@ -436,6 +578,8 @@ int main(int argc, char **argv) {
     test_against_c();
     test_signed();
     test_device_api();
+    test_below();
+    test_normal();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

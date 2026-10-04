@@ -24,6 +24,10 @@ It produces the stream the specification defines, bit for bit.
   fills use the tile kernel like the wider ones.
 - `tandem::fill_i8/i16/i32/i64`: the unsigned fill of the same width read in two's
   complement, as the specification defines signed integers.
+- `tandem::fill_u32_below(key, pos, K, range, out, n, stream)`, `fill_u64_below`: `n` draws
+  uniform on `[0, range)`, as `Rng::urand(range)`. Not part of the specification.
+- `tandem::fill_normal_f64/f32(key, pos, K, out, n, stream)`: `n` standard normals by
+  Box-Muller, as `Rng::normal()`. Not part of the specification.
 - `tandem::device_rng`: a per-thread generator for kernels that draw scalars. It holds the
   transport form (public fields `key`, `pos`, `K`) and one cached chunk state, about 20
   registers. `from_key`, `seed`, `skip_to`, `next_bool/u8/u16/u32/u64/f16_bits/f32/f64`. Its
@@ -36,6 +40,34 @@ It produces the stream the specification defines, bit for bit.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
   from `core.hpp`.
 
+## Bounded and normal fills
+
+These fills are not part of the specification. Other ports should follow the same contract,
+and the C library's `tandem_fill_u32_below`, `tandem_fill_u64_below` and
+`tandem_fill_normal_f64/f32` do, up to the rare case below.
+
+**Normals.** Element `i` is Box-Muller of the Float64 draws `2i` and `2i + 1` of the Float64
+fill that starts at the same position: `u = 1 - d[2i]`, `v = d[2i + 1]`,
+`sqrt(-2 ln u) cos(2 pi v)`. The fill starts at `pos` aligned up to 64 bits, consumes `128 n`
+bits and returns that position, so it equals `n` calls of `Rng::normal()`. A start at an odd
+Float64 draw makes every element span two blocks, and the kernel steps a second chunk per
+thread to read them, at about 80% of the speed. `fill_normal_f32` rounds the same doubles to
+`float`. It does not use the Float32 draws. The device `log` and `cos` can differ from the host's
+in the last bits, so normals agree across hosts and devices to about 1e-15 relative, not bit
+for bit. Everything else in this library does.
+
+**Bounded integers.** Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
+Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
+`2^32 mod range` (or its 64-bit analogue), result the high word. The fill consumes exactly `n`
+draws, so it returns `align(pos, w) + w n` at once, without waiting for the device. A sequential
+`Rng::urand(range)` loop would consume extra draws after a rejection, and a parallel fill
+cannot know how many. So a rejected draw `e` retries on a fallback stream: draws `0, 1, ...` of
+`split(e)` of `sub(P)` of the fill's generator at position 0 (same key and `K`), with
+`P = 0x424c573332` for 32-bit and `0x424c573634` for 64-bit ranges, until one is accepted.
+Those two purposes are reserved. A rejection has probability `(2^32 mod range) / 2^32`, so
+ranges that are powers of two never reject, and a fill without rejections equals the sequential
+loop. `range = 0` returns 0.
+
 ## Use
 
 Put `include/` on the include path, for example `nvcc -I<tandem-cuda>/include`.
@@ -47,6 +79,12 @@ const uint32_t key[4] = {1, 2, 3, 4};
 double *x;
 cudaMalloc(&x, n * sizeof(double));
 uint64_t pos = tandem::fill_f64(key, 0, 32, x, n);   // the spec's Float64 fill from position 0
+uint32_t *die;                                       // 6-sided dice, n draws from the UInt32 stream
+cudaMalloc(&die, n * sizeof(uint32_t));
+pos = tandem::fill_u32_below(key, pos, 32, 6, die, n);
+float *z;                                            // standard normals
+cudaMalloc(&z, n * sizeof(float));
+pos = tandem::fill_normal_f32(key, pos, 32, z, n);
 
 __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float *out) {
     const uint32_t key[4] = {k0, k1, k2, k3};
@@ -72,7 +110,10 @@ chunk lengths, positions, lengths and output alignments with the reference C imp
 compiled into the test (a checkout at `TANDEM_C`). One mixed sequence of draws on a device
 generator, with bounded draws at small and at rejecting ranges, normals, `at_*`, `fork`,
 `split` and `sub`, is compared with the C library, normals to 1e-12 and the rest bit for
-bit. The fill comparison covers u8, u16, u32, u64, f16 bits,
+bit. Bounded fills are compared at ranges that reject often, rarely and never, against a
+reference of the contract above written on the C library's generators, and, where nothing
+rejects, against the sequential C bounded draws. Normal fills are compared with the C fills,
+at even and odd Float64 starts. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `pixi.toml` provides a CUDA
 12.8 toolchain from conda-forge for hosts without a system install.

@@ -6,6 +6,10 @@
  *
  *   - tandem::fill_u32/u64/f32/f64: fill device memory from a key and stream position. One
  *     thread per chunk, blocks stored lane-interleaved so a warp writes whole 128-byte lines.
+ *   - tandem::fill_u32_below/u64_below, fill_normal_f64/f32: bounded integers and normals, which
+ *     are not part of the specification. A bounded element consumes one draw and a rejected draw
+ *     retries on a fallback stream, a normal is Box-Muller of two Float64 draws of the fill.
+ *     See the README for the stream contract.
  *   - tandem::device_rng: a per-thread generator with one cached chunk state, for kernels
  *     that draw scalars. Its draws equal the C library's tandem_next_* calls.
  *
@@ -68,6 +72,16 @@ namespace detail {
 /* Kinds that share an output type with another kind. */
 struct bool_bits {}; /* one stream bit per bool, stored as a byte */
 struct f16_bits {};  /* binary16 bit patterns, stored as uint16_t */
+struct below32 {};   /* Lemire bounded draws over the u32 fill, see PURPOSE_BELOW32 */
+struct below64 {};
+
+/* What a kind needs beyond the block words: the fill's key and chunk length, and the range
+ * of the bounded kinds. */
+struct Ctx {
+    const uint32_t *key;
+    uint32_t K;
+    uint64_t range;
+};
 
 /* How an output element is made from the four words of a block. `i` is the element's index in
  * the block, `bits` its width in the stream. */
@@ -76,46 +90,60 @@ template <class E> struct elem;
 template <> struct elem<uint32_t> {
     using out_t = uint32_t;
     static constexpr unsigned bits = 32;
-    __device__ static out_t make(const uint32_t w[4], unsigned i) { return w[i]; }
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t, const Ctx &) { return w[i]; }
 };
 template <> struct elem<float> {
     using out_t = float;
     static constexpr unsigned bits = 32;
-    __device__ static out_t make(const uint32_t w[4], unsigned i) { return to_f32(w[i]); }
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t, const Ctx &) { return to_f32(w[i]); }
 };
 template <> struct elem<uint64_t> {
     using out_t = uint64_t;
     static constexpr unsigned bits = 64;
-    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t, const Ctx &) {
         return w[2 * i] | ((uint64_t)w[2 * i + 1] << 32);
     }
 };
 template <> struct elem<double> {
     using out_t = double;
     static constexpr unsigned bits = 64;
-    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t, const Ctx &) {
         return to_f64(w[2 * i] | ((uint64_t)w[2 * i + 1] << 32));
     }
 };
 template <> struct elem<uint16_t> {
     using out_t = uint16_t;
     static constexpr unsigned bits = 16;
-    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t, const Ctx &) {
         return (uint16_t)(w[i >> 1] >> ((i & 1u) * 16u));
     }
 };
 template <> struct elem<f16_bits> {
     using out_t = uint16_t;
     static constexpr unsigned bits = 16;
-    __device__ static out_t make(const uint32_t w[4], unsigned i) {
-        return to_f16_bits(elem<uint16_t>::make(w, i));
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t, const Ctx &x) {
+        return to_f16_bits(elem<uint16_t>::make(w, i, 0, x));
     }
 };
 template <> struct elem<uint8_t> {
     using out_t = uint8_t;
     static constexpr unsigned bits = 8;
-    __device__ static out_t make(const uint32_t w[4], unsigned i) {
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t, const Ctx &) {
         return (uint8_t)(w[i >> 2] >> ((i & 3u) * 8u));
+    }
+};
+template <> struct elem<below32> {
+    using out_t = uint32_t;
+    static constexpr unsigned bits = 32;
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t e, const Ctx &x) {
+        return below_u32(w[i], (uint32_t)x.range, x.key, x.K, e);
+    }
+};
+template <> struct elem<below64> {
+    using out_t = uint64_t;
+    static constexpr unsigned bits = 64;
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t e, const Ctx &x) {
+        return below_u64(w[2 * i] | ((uint64_t)w[2 * i + 1] << 32), x.range, x.key, x.K, e);
     }
 };
 template <> struct elem<bool_bits> {
@@ -134,12 +162,16 @@ template <> struct vec4<double> { using type = double2; };
  * output's blocks sit at 16-byte addresses, and a block fully inside is one vector store. */
 template <class E, bool ALIGNED>
 __device__ __forceinline__ void store_block(typename elem<E>::out_t *out, uint64_t b0,
-                                            uint64_t b1, uint64_t first, const uint32_t w[4]) {
+                                            uint64_t b1, uint64_t first, const uint32_t w[4],
+                                            const Ctx &x) {
     using out_t = typename elem<E>::out_t;
     constexpr unsigned size = elem<E>::bits / 8;
     constexpr unsigned per_block = 16 / size;
     out_t v[per_block];
-    for (unsigned i = 0; i < per_block; i++) v[i] = elem<E>::make(w, i);
+    /* Element index i of the block, for the elements inside the output. The difference wraps
+     * for a block that starts before the output, and stays right once i * size is added. */
+    uint64_t d = first - b0;
+    for (unsigned i = 0; i < per_block; i++) v[i] = elem<E>::make(w, i, (d + i * size) / size, x);
     char *dst = reinterpret_cast<char *>(out) + (first - b0);
     if (ALIGNED && first >= b0 && first + 16 <= b1) {
         *reinterpret_cast<typename vec4<E>::type *>(dst) =
@@ -161,19 +193,20 @@ constexpr unsigned TILE_STEPS = 8;
 template <class E, bool ALIGNED>
 __global__ void fill_rows_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3,
                                  uint32_t K, uint64_t g0, uint64_t r0, uint64_t r1, uint64_t b0,
-                                 uint64_t b1, typename elem<E>::out_t *out) {
+                                 uint64_t b1, uint64_t range, typename elem<E>::out_t *out) {
     uint64_t c = 8u * g0 + blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
     uint64_t g = c >> 3, lane = c & 7u;
     if (g > r1 / K) return;
     const uint32_t key[4] = {key0, key1, key2, key3};
     uint32_t o[4], h[4];
     F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
+    const Ctx x{key, K, range};
     uint64_t row = g * K;
     uint32_t j0 = row < r0 ? (uint32_t)(r0 - row) : 0u;
     uint32_t j1 = (uint32_t)(r1 - row < K - 1u ? r1 - row : K - 1u);
     for (uint32_t j = 0; j <= j1; j++) {
         T(o, h);
-        if (j >= j0) store_block<E, ALIGNED>(out, b0, b1, (row + j) * 128u + lane * 16u, o);
+        if (j >= j0) store_block<E, ALIGNED>(out, b0, b1, (row + j) * 128u + lane * 16u, o, x);
     }
 }
 
@@ -184,7 +217,7 @@ __global__ void fill_rows_kernel(uint32_t key0, uint32_t key1, uint32_t key2, ui
 template <class E, bool ALIGNED>
 __global__ void __launch_bounds__(THREADS)
     fill_tile_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3, uint32_t K,
-                     uint64_t g0, uint64_t r1, uint64_t b0, uint64_t b1,
+                     uint64_t g0, uint64_t r1, uint64_t b0, uint64_t b1, uint64_t range,
                      typename elem<E>::out_t *out) {
     constexpr unsigned GROUPS = THREADS / 8, SLOTS = GROUPS * TILE_STEPS * 8;
     __shared__ uint4 tile[SLOTS];
@@ -195,6 +228,7 @@ __global__ void __launch_bounds__(THREADS)
     const uint32_t key[4] = {key0, key1, key2, key3};
     uint32_t o[4], h[4];
     F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
+    const Ctx x{key, K, range};
     uint64_t block_first = gb * K * 128u; /* stream byte of the block's first row */
     for (uint32_t jb = 0; jb < K; jb += TILE_STEPS) {
         if (block_first + jb * 128u > b1) break;
@@ -211,7 +245,7 @@ __global__ void __launch_bounds__(THREADS)
             if (first >= b1) continue;
             uint4 v = tile[s];
             uint32_t w[4] = {v.x, v.y, v.z, v.w};
-            store_block<E, ALIGNED>(out, b0, b1, first, w);
+            store_block<E, ALIGNED>(out, b0, b1, first, w, x);
         }
         __syncthreads();
     }
@@ -265,12 +299,67 @@ __global__ void __launch_bounds__(THREADS)
     }
 }
 
+/* Normal fill. Element i is Box-Muller of the Float64 draws 2i and 2i + 1 of the fill, so the
+ * first draw of the fill sits at the position aligned to 64 bits. With that position at an
+ * even draw, both draws of an element are the halves of one block. At an odd draw (ODD) they
+ * are the high half of one block and the low half of the next, so each thread also steps the
+ * chunk that holds its predecessor block: chunk c - 1, or for lane 0 the last lane of the
+ * previous row, which is chunk 8g + 7 one step behind or, at step 0, the previous group's. Block
+ * `ba` is the first block that yields an element, `bb` the last. One element per block. */
+template <class O, bool ODD>
+__global__ void __launch_bounds__(THREADS)
+    fill_normal_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3, uint32_t K,
+                       uint64_t g0, uint64_t ba, uint64_t bb, O *out) {
+    uint64_t c = 8u * g0 + blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
+    uint64_t g = c >> 3, lane = c & 7u;
+    if (g * K * 8u > bb) return;
+    const uint32_t key[4] = {key0, key1, key2, key3};
+    uint32_t o[4], h[4], po[4] = {0, 0, 0, 0}, ph[4] = {0, 0, 0, 0};
+    F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
+    if (ODD) F_keyed(key, lane ? c - 1u : 8u * g + 7u, DOMAIN_STREAM, AUX_STREAM, po, ph);
+    for (uint32_t j = 0; j < K; j++) {
+        uint64_t beta = (g * K + j) * 8u + lane;
+        if (beta > bb) break;
+        T(o, h);
+        if (ODD && (lane || j)) T(po, ph);
+        if (beta < ba) continue;
+        uint32_t q[4];
+        const uint32_t *prev = po;
+        if (ODD && lane == 0 && j == 0) {
+            block(key, 8u * (g - 1u) + 7u, K - 1u, q);
+            prev = q;
+        }
+        uint64_t u = ODD ? prev[2] | ((uint64_t)prev[3] << 32) : o[0] | ((uint64_t)o[1] << 32);
+        uint64_t v = ODD ? o[0] | ((uint64_t)o[1] << 32) : o[2] | ((uint64_t)o[3] << 32);
+        out[beta - ba] = (O)box_muller(to_f64(u), to_f64(v));
+    }
+}
+
+template <class O>
+inline uint64_t fill_normal(const uint32_t key[4], uint64_t pos, uint32_t K, O *out, size_t n,
+                            cudaStream_t stream) {
+    K = K ? K : DEFAULT_K;
+    uint64_t p0 = align_pos(pos, 64), p1 = p0 + (uint64_t)n * 128u;
+    if (n == 0) return p1;
+    bool odd = (p0 >> 6) & 1u;
+    uint64_t ba = (p0 >> 7) + (odd ? 1u : 0u), bb = ba + n - 1u;
+    uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K;
+    unsigned blocks = (unsigned)((8u * (g1 - g0 + 1u) + THREADS - 1) / THREADS);
+    if (odd)
+        fill_normal_kernel<O, true><<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2],
+                                                                    key[3], K, g0, ba, bb, out);
+    else
+        fill_normal_kernel<O, false><<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2],
+                                                                     key[3], K, g0, ba, bb, out);
+    return p1;
+}
+
 /* `tile` selects the shared-memory kernel where K allows; the tests and the bench also run
  * the direct kernel at every K. */
 template <class E>
 inline uint64_t fill(const uint32_t key[4], uint64_t pos, uint32_t K,
                      typename elem<E>::out_t *out, size_t n, cudaStream_t stream,
-                     bool tile = true) {
+                     bool tile = true, uint64_t range = 0) {
     constexpr unsigned bits = elem<E>::bits;
     K = K ? K : DEFAULT_K;
     uint64_t p0 = align_pos(pos, bits), p1 = p0 + (uint64_t)n * bits;
@@ -296,18 +385,18 @@ inline uint64_t fill(const uint32_t key[4], uint64_t pos, uint32_t K,
         unsigned blocks = (unsigned)((groups + THREADS / 8 - 1) / (THREADS / 8));
         if (aligned)
             fill_tile_kernel<E, true><<<blocks, THREADS, 0, stream>>>(
-                key[0], key[1], key[2], key[3], K, g0, r1, b0, b1, out);
+                key[0], key[1], key[2], key[3], K, g0, r1, b0, b1, range, out);
         else
             fill_tile_kernel<E, false><<<blocks, THREADS, 0, stream>>>(
-                key[0], key[1], key[2], key[3], K, g0, r1, b0, b1, out);
+                key[0], key[1], key[2], key[3], K, g0, r1, b0, b1, range, out);
     } else {
         unsigned blocks = (unsigned)((8u * groups + THREADS - 1) / THREADS);
         if (aligned)
             fill_rows_kernel<E, true><<<blocks, THREADS, 0, stream>>>(
-                key[0], key[1], key[2], key[3], K, g0, r0, r1, b0, b1, out);
+                key[0], key[1], key[2], key[3], K, g0, r0, r1, b0, b1, range, out);
         else
             fill_rows_kernel<E, false><<<blocks, THREADS, 0, stream>>>(
-                key[0], key[1], key[2], key[3], K, g0, r0, r1, b0, b1, out);
+                key[0], key[1], key[2], key[3], K, g0, r0, r1, b0, b1, range, out);
     }
     return p1;
 }
@@ -366,6 +455,33 @@ inline uint64_t fill_i32(const uint32_t key[4], uint64_t pos, uint32_t K, int32_
 inline uint64_t fill_i64(const uint32_t key[4], uint64_t pos, uint32_t K, int64_t *out,
                          size_t n, cudaStream_t stream = 0) {
     return fill_u64(key, pos, K, reinterpret_cast<uint64_t *>(out), n, stream);
+}
+
+/* Bounded fills: n draws uniform on [0, range), by Lemire's method as Rng::urand(range). Each
+ * element consumes exactly one draw of the u32 (u64) fill, so the fill advances the position
+ * by 32 n (64 n) bits whatever the draws are. A rejected draw retries on a fallback stream,
+ * see PURPOSE_BELOW32 in core.hpp. Not part of the specification. */
+inline uint64_t fill_u32_below(const uint32_t key[4], uint64_t pos, uint32_t K, uint32_t range,
+                               uint32_t *out, size_t n, cudaStream_t stream = 0) {
+    return detail::fill<detail::below32>(key, pos, K, out, n, stream, true, range);
+}
+inline uint64_t fill_u64_below(const uint32_t key[4], uint64_t pos, uint32_t K, uint64_t range,
+                               uint64_t *out, size_t n, cudaStream_t stream = 0) {
+    return detail::fill<detail::below64>(key, pos, K, out, n, stream, true, range);
+}
+
+/* Standard normals by Box-Muller, as Rng::normal. Element i is made from the Float64 draws 2i
+ * and 2i + 1 of the fill that starts at the position aligned to 64 bits, so the fill consumes
+ * 128 n bits and equals n successive Rng::normal() calls. The f32 fill rounds the same
+ * doubles. Device log and cos may differ from the host's in the last bit or two. Not part of
+ * the specification. */
+inline uint64_t fill_normal_f64(const uint32_t key[4], uint64_t pos, uint32_t K, double *out,
+                                size_t n, cudaStream_t stream = 0) {
+    return detail::fill_normal(key, pos, K, out, n, stream);
+}
+inline uint64_t fill_normal_f32(const uint32_t key[4], uint64_t pos, uint32_t K, float *out,
+                                size_t n, cudaStream_t stream = 0) {
+    return detail::fill_normal(key, pos, K, out, n, stream);
 }
 
 } // namespace tandem

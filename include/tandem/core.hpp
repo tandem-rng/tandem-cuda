@@ -318,6 +318,11 @@ struct Key {
     uint32_t w[4];
 };
 
+/* Box-Muller from two Float64 draws a and b in [0, 1): u = 1 - a is in (0, 1]. */
+TANDEM_FN double box_muller(double a, double b) {
+    return std::sqrt(-2.0 * std::log(1.0 - a)) * std::cos(6.283185307179586 * b);
+}
+
 TANDEM_FN bool operator==(const Key &a, const Key &b) {
     return a.w[0] == b.w[0] && a.w[1] == b.w[1] && a.w[2] == b.w[2] && a.w[3] == b.w[3];
 }
@@ -459,8 +464,8 @@ template <class D> class Draws {
 
     /* Standard normal by Box-Muller from two Float64 draws, the first mapped to (0, 1]. */
     TANDEM_FN double normal() {
-        double u = 1.0 - drand(), v = drand();
-        return std::sqrt(-2.0 * std::log(u)) * std::cos(6.283185307179586 * v);
+        double a = drand();
+        return box_muller(a, drand());
     }
     TANDEM_FN double normal(double mean, double std_dev = 1.0) { return mean + std_dev * normal(); }
 
@@ -547,5 +552,69 @@ class Rng : public Draws<Rng> {
     TANDEM_FN GenState &st() { return s_; }
     TANDEM_FN const GenState &st() const { return s_; }
 };
+
+/* Parallel bounded fills cannot know how many draws earlier elements rejected, so element e
+ * of a fill takes the draw at its own index and consumes exactly one draw. A rejected first
+ * draw retries with Lemire's rule on the draws of a fallback generator, split(e) of
+ * sub(PURPOSE_BELOW32 or 64) of the fill's generator, starting at its position 0. The two
+ * purposes are reserved for this. A fill without rejections equals the sequential urand(range)
+ * calls. A rejection has probability (2^32 mod range) / 2^32, or the 64-bit analogue. */
+constexpr uint64_t PURPOSE_BELOW32 = 0x424c573332ull; /* "BLW32" */
+constexpr uint64_t PURPOSE_BELOW64 = 0x424c573634ull; /* "BLW64" */
+
+/* The retry loops sit out of line: a rejection is rare, and inlining a generator's seeding into
+ * every bounded fill costs registers on the common path. */
+#if defined(__GNUC__) || defined(__clang__)
+#define TANDEM_COLD __attribute__((noinline))
+#else
+#define TANDEM_COLD
+#endif
+
+TANDEM_COLD TANDEM_FN uint32_t below_retry_u32(uint32_t range, uint32_t t, const uint32_t key[4],
+                                               uint32_t K, uint64_t e) {
+    Rng r = Rng::from_key(Key{{key[0], key[1], key[2], key[3]}}, 0, K)
+                .sub(PURPOSE_BELOW32)
+                .split(e);
+    uint64_t m;
+    do
+        m = (uint64_t)r.urand() * range;
+    while ((uint32_t)m < t);
+    return (uint32_t)(m >> 32);
+}
+
+TANDEM_COLD TANDEM_FN uint64_t below_retry_u64(uint64_t range, uint64_t t, const uint32_t key[4],
+                                               uint32_t K, uint64_t e) {
+    Rng r = Rng::from_key(Key{{key[0], key[1], key[2], key[3]}}, 0, K)
+                .sub(PURPOSE_BELOW64)
+                .split(e);
+    uint64_t x, lo;
+    do {
+        x = r.urand64();
+        lo = x * range;
+    } while (lo < t);
+    return mulhi64(x, range);
+}
+
+TANDEM_FN uint32_t below_u32(uint32_t u, uint32_t range, const uint32_t key[4], uint32_t K,
+                             uint64_t e) {
+    uint64_t m = (uint64_t)u * range;
+    if ((uint32_t)m < range) {
+        uint32_t t = (0u - range) % range;
+        if ((uint32_t)m < t)
+            return below_retry_u32(range, t, key, K, e);
+    }
+    return (uint32_t)(m >> 32);
+}
+
+TANDEM_FN uint64_t below_u64(uint64_t x, uint64_t range, const uint32_t key[4], uint32_t K,
+                             uint64_t e) {
+    uint64_t lo = x * range;
+    if (lo < range) {
+        uint64_t t = (0u - range) % range;
+        if (lo < t)
+            return below_retry_u64(range, t, key, K, e);
+    }
+    return mulhi64(x, range);
+}
 
 } // namespace tandem

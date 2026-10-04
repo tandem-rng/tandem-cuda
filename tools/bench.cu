@@ -90,6 +90,17 @@ int main() {
     std::printf("%-34s %10.0f\n", "tandem fill_bool, shared-mem kernel",
                 best_gibs(N, [&] { tandem::fill_bool(key, 0, 32, b8, N); }));
 
+    std::printf("%-34s %10.0f\n", "tandem fill_u32_below(1000)",
+                best_gibs(N * 4, [&] { tandem::fill_u32_below(key, 0, 32, 1000u, u32, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_u64_below(1000)",
+                best_gibs(N * 8, [&] { tandem::fill_u64_below(key, 0, 32, 1000u, u64, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_normal_f32",
+                best_gibs(N * 4, [&] { tandem::fill_normal_f32(key, 0, 32, f32, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_normal_f64",
+                best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 0, 32, f64, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_normal_f64, odd start",
+                best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 64, 32, f64, N); }));
+
     curandGenerator_t g;
     curandCreateGenerator(&g, CURAND_RNG_PSEUDO_PHILOX4_32_10);
     curandSetPseudoRandomGeneratorSeed(g, 42);
@@ -99,6 +110,10 @@ int main() {
                 best_gibs(N * 4, [&] { curandGenerateUniform(g, f32, N); }));
     std::printf("%-34s %10.0f\n", "cuRAND Philox4x32-10 f64",
                 best_gibs(N * 8, [&] { curandGenerateUniformDouble(g, f64, N); }));
+    std::printf("%-34s %10.0f\n", "cuRAND Philox4x32-10 normal f32",
+                best_gibs(N * 4, [&] { curandGenerateNormal(g, f32, N, 0.f, 1.f); }));
+    std::printf("%-34s %10.0f\n", "cuRAND Philox4x32-10 normal f64",
+                best_gibs(N * 8, [&] { curandGenerateNormalDouble(g, f64, N, 0., 1.); }));
     curandDestroyGenerator(g);
     CUDA_CHECK(cudaFree(buf));
     return 0;
