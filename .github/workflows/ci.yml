@@ -12,8 +12,19 @@ permissions:
 # the vector header. Run `make test` and `make bench` on a GPU host by hand.
 jobs:
   build:
-    name: nvcc build (pixi toolchain)
+    name: nvcc ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: CUDA 13, clang 20, C++23
+            env: default
+          - name: CUDA 13, gcc 14, C++23
+            env: gcc
+            host: HOSTCXX=g++ HOSTCC=gcc
+          - name: CUDA 12.8, clang 19, C++23
+            env: cuda12
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
@@ -23,7 +34,25 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.9.3
         with:
           locked: false
-      - run: pixi run make build TANDEM_C=tandem-c
+          environments: ${{ matrix.env }}
+      - run: pixi run -e ${{ matrix.env }} make build TANDEM_C=tandem-c ${{ matrix.host }}
+  core-cxx17:
+    name: core.hpp as C++17 (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - cc: clang
+            cxx: clang++
+          - cc: gcc
+            cxx: g++
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: tandem-rng/tandem-c
+          path: tandem-c
+      - run: make host TANDEM_C=tandem-c HOSTCC=${{ matrix.cc }} HOSTCXX=${{ matrix.cxx }}
   vectors:
     name: vector header is current
     runs-on: ubuntu-latest

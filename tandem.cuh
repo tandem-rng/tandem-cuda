@@ -1,5 +1,5 @@
 /* Tandem8x32 for CUDA: a noncryptographic pseudorandom number generator, fast on CPUs and
- * GPUs alike. Header only, C++17, on the portable core include/tandem/core.hpp.
+ * GPUs alike. Header only, built as C++20 or later, on the portable C++17 core include/tandem/core.hpp.
  *
  * Implements https://github.com/tandem-rng/spec and produces the stream it defines, bit for
  * bit. Entry points:

@@ -3,7 +3,7 @@
 # tandem-cuda
 
 CUDA implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncryptographic
-pseudorandom number generator built to be fast on CPUs and GPUs alike. Header only, C++17.
+pseudorandom number generator built to be fast on CPUs and GPUs alike. Header only. `tandem.cuh` is built as C++23 with CUDA 13.4 and clang 20, and `include/tandem/core.hpp` stays valid C++17.
 It produces the stream the specification defines, bit for bit.
 
 - `tandem.cuh`: the CUDA fills and `device_rng`.
@@ -147,12 +147,22 @@ every start slot, odd and even `n`, to 1e-12 (f64) and 16 ulps + 1e-6 (f32, 4 ul
 `tests/cross_fill_normal.h`. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
-returned positions. `pixi.toml` provides a CUDA
-12.8 toolchain from conda-forge for hosts without a system install.
+returned positions. `tests/host_core.cpp` (`make host`) builds `core.hpp` as C++17 with clang and
+gcc and compares the scalar generator with the C library, because tandem-kokkos, tandem-fortran
+and tandem-torch include it with their own standards.
+
+**Toolchains.** `pixi.toml` provides conda-forge environments for hosts without a system install.
+The default is CUDA 13.4 (nvcc 13.4.92) with clang 20 as the host compiler and `-std=c++23`, with
+no warnings under `-Wall -Wextra`. `pixi run -e gcc` builds the same with gcc 14 as host compiler
+(`make HOSTCXX=g++ HOSTCC=gcc`). `pixi run -e cuda12` is CUDA 12.8 (nvcc 12.8.93) with clang 19 and
+`-std=c++20`, because nvcc 12.8 stops at C++20. CI builds all three. The GPU host batserv01 has
+NVIDIA driver 570.124, which supports CUDA 12.8 at most, so its test suite and the speeds below run
+in the `cuda12` environment. A CUDA 13 binary needs driver 580 or newer. The GPU suite passed there
+with CUDA 12.8, clang 19 and C++20; the CUDA 13 environments are compiled but not run.
 
 ## Speed
 
-NVIDIA A100 40 GB (PCIe), CUDA 12.8, `make bench`: 2^28 elements into device memory,
+NVIDIA A100 40 GB (PCIe), CUDA 12.8 (gcc 13, `-std=c++17`), `make bench`: 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
 the run. Consecutive runs agreed within 1%, except the normal rows within 6%. The elements are
 2^28 of each type, so the rows for narrow types write fewer bytes.

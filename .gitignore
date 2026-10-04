@@ -5,3 +5,4 @@ tools/bench
 pixi.lock
 tools/gen_cross_fill_below
 tools/gen_cross_fill_normal
+tests/host_core

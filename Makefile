@@ -1,23 +1,28 @@
 NVCC ?= nvcc
 CC ?= cc
 ARCH ?= -arch=sm_80
-NVCCFLAGS ?= -std=c++17 -O3 $(ARCH) -Xcompiler -Wall,-Wextra
+CUDASTD ?= c++23
+NVCCFLAGS ?= -std=$(CUDASTD) -O3 $(ARCH) -Xcompiler -Wall,-Wextra
 TANDEM_C ?= ../tandem-c
 SPEC_VECTORS ?= ../tandem-spec/vectors.json
-CXX_HOST ?= c++
 HEADERS := tandem.cuh include/tandem/core.hpp
 
-# nvcc needs a host compiler it knows; a conda toolchain names one through CXX.
-ifdef CXX
-NVCCFLAGS += -ccbin $(CXX)
-endif
+# clang is the host compiler, gcc is a compatibility build: make HOSTCXX=g++ HOSTCC=gcc.
+HOSTCXX ?= clang++
+HOSTCC ?= clang
+NVCCFLAGS += -ccbin $(HOSTCXX)
+# conda activation prepends its own -ccbin, which nvcc would warn about.
+export NVCC_PREPEND_FLAGS :=
+CC = $(HOSTCC)
+CXX_HOST = $(HOSTCXX)
+
 # Binaries find the CUDA libraries that belong to the nvcc that built them, also inside a
 # conda environment. The environment's LDFLAGS are gcc flags that nvcc rejects, so they
 # are not used.
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test bench vectors cross clean
+.PHONY: build test bench host vectors cross clean
 
 build: tests/test_cuda tools/bench
 
@@ -36,6 +41,13 @@ test: tests/test_cuda
 bench: tools/bench
 	./tools/bench
 
+# core.hpp must stay valid C++17 for its other consumers, so this build pins the standard.
+tests/host_core: tests/host_core.cpp include/tandem/core.hpp tandem_c.o
+	$(CXX_HOST) -std=c++17 -O2 -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ tests/host_core.cpp tandem_c.o
+
+host: tests/host_core
+	./tests/host_core
+
 # Regenerate the vector header from a checkout of https://github.com/tandem-rng/spec.
 vectors:
 	python3 tools/gen_vectors.py $(SPEC_VECTORS) > tests/vectors.h
@@ -48,4 +60,4 @@ cross:
 	./tools/gen_cross_fill_normal > tests/cross_fill_normal.h
 
 clean:
-	rm -f tandem_c.o tests/test_cuda tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal
+	rm -f tandem_c.o tests/test_cuda tests/host_core tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal

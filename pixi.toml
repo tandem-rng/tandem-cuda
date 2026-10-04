@@ -1,19 +1,51 @@
-# Development environment with a CUDA 12.8 toolchain from conda-forge, for GPU hosts
-# without a system CUDA install. `pixi run test`, `pixi run bench`.
+# Development environments for GPU hosts without a system CUDA install. The default is the
+# newest stable toolchain: CUDA 13 with clang as the host compiler, C++23.
+# `pixi run test`, `pixi run bench`. `-e gcc` builds with gcc as the host compiler, and
+# `-e cuda12` with CUDA 12.8 for hosts whose driver is older than CUDA 13 needs.
 [workspace]
 name = "tandem-cuda"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
 
 [dependencies]
+make = "*"
+python = ">=3.11"
+
+[feature.cuda13.dependencies]
+cuda-version = "13.*"
+cuda-nvcc = "13.*"
+cuda-cudart-dev = "13.*"
+libcurand-dev = "*"
+
+[feature.cuda12.dependencies]
 cuda-version = "12.8.*"
 cuda-nvcc = "12.8.*"
 cuda-cudart-dev = "12.8.*"
 libcurand-dev = "*"
+
+# clang takes its C++ library from the gcc toolchain package.
+# nvcc 12.8 stops at C++20.
+[feature.cuda12.activation.env]
+CUDASTD = "c++20"
+
+[feature.clang.dependencies]
+clangxx = "20.*"
+clang = "20.*"
+gxx = "14.*"
+
+[feature.clang19.dependencies]
+clangxx = "19.*"
+clang = "19.*"
 gxx = "13.*"
-gcc = "13.*"
-make = "*"
-python = ">=3.11"
+
+[feature.gcc.dependencies]
+gxx = "14.*"
+gcc = "14.*"
+
+[environments]
+default = ["cuda13", "clang"]
+gcc = ["cuda13", "gcc"]
+cuda12 = ["cuda12", "clang19"]
 
 [tasks]
 build = "make build"
