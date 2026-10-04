@@ -168,35 +168,35 @@ with CUDA 12.8, clang 19 and C++20; the CUDA 13 environments are compiled but no
 
 ## Speed
 
-NVIDIA A100 40 GB (PCIe), CUDA 12.8 (gcc 13, `-std=c++17`), `make bench`: 2^28 elements into device memory,
+NVIDIA A100 40 GB (PCIe), CUDA 12.8 built by clang 19 as the nvcc host compiler with `-std=c++20` (`pixi run -e cuda12 make bench`): 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
-the run. Consecutive runs agreed within 1%, except the normal rows within 6%. The elements are
+the run. Consecutive runs agreed within 1%, except the f64 normal rows within 7%. The elements are
 2^28 of each type, so the rows for narrow types write fewer bytes.
 
 | | GiB/s written |
 |---|---|
-| `tandem::fill_u32`, tile kernel (default for K >= 8) | 1383 |
-| `tandem::fill_u64`, tile kernel | 1395 |
-| `tandem::fill_f32`, tile kernel | 1383 |
-| `tandem::fill_f64`, tile kernel | 1394 |
-| `tandem::fill_u32`, direct kernel (K < 8) | 1309 |
-| `tandem::fill_u64`, direct kernel | 1313 |
-| `tandem::fill_f32`, direct kernel | 1309 |
+| `tandem::fill_u32`, tile kernel (default for K >= 8) | 1386 |
+| `tandem::fill_u64`, tile kernel | 1394 |
+| `tandem::fill_f32`, tile kernel | 1381 |
+| `tandem::fill_f64`, tile kernel | 1392 |
+| `tandem::fill_u32`, direct kernel (K < 8) | 1308 |
+| `tandem::fill_u64`, direct kernel | 1315 |
+| `tandem::fill_f32`, direct kernel | 1312 |
 | `tandem::fill_f64`, direct kernel | 1323 |
-| `tandem::fill_u16`, tile kernel | 1364 |
-| `tandem::fill_f16_bits`, tile kernel | 1368 |
-| `tandem::fill_u8`, tile kernel | 1334 |
-| `tandem::fill_bool` (one byte per bit) | 1227 |
+| `tandem::fill_u16`, tile kernel | 1370 |
+| `tandem::fill_f16_bits`, tile kernel | 1364 |
+| `tandem::fill_u8`, tile kernel | 1330 |
+| `tandem::fill_bool` (one byte per bit) | 1212 |
 | `tandem::fill_u32_below(1000)` | 1336 |
 | `tandem::fill_u64_below(1000)` | 1348 |
-| `tandem::fill_normal_f64` | 765 |
-| `tandem::fill_normal_f64`, start at an odd Float64 draw | 590 |
+| `tandem::fill_normal_f64` | 750 |
+| `tandem::fill_normal_f64`, start at an odd Float64 draw | 595 |
 | `tandem::fill_normal_f32` | 1290 |
-| cuRAND Philox4x32-10 `curandGenerate` | 1332 |
-| cuRAND Philox4x32-10 `curandGenerateUniform` | 1307 |
-| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 781 |
-| cuRAND Philox4x32-10 `curandGenerateNormal` | 966 |
-| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 587 |
+| cuRAND Philox4x32-10 `curandGenerate` | 1306 |
+| cuRAND Philox4x32-10 `curandGenerateUniform` | 1311 |
+| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 795 |
+| cuRAND Philox4x32-10 `curandGenerateNormal` | 980 |
+| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 597 |
 
 The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
 as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.
