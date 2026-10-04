@@ -86,6 +86,15 @@ The direct kernel stores each block straight from registers, so the eight thread
 cover one 128-byte line per step. Both kernels pick a 16-byte vector store at compile time
 when the output's blocks are 16-byte aligned.
 
+## AI assistance
+
+This port was written with the help of large language models under human
+direction. The design and the specification are human work, as is much of the
+Julia implementation. The code is tested bit for bit against every vector of
+the specification and against long stream dumps from the Julia implementation,
+and every value must match. The output does not depend on who or what wrote the
+code.
+
 ## License
 
 Apache License 2.0. See `LICENSE` and `NOTICE`.
