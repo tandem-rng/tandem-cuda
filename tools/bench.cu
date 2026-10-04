@@ -125,6 +125,10 @@ int main() {
                 best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 0, 32, f64, N); }));
     std::printf("%-34s %10.0f\n", "tandem fill_normal_f64, odd start",
                 best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 64, 32, f64, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_exponential_f32",
+                best_gibs(N * 4, [&] { tandem::fill_exponential_f32(key, 0, 32, f32, N); }));
+    std::printf("%-34s %10.0f\n", "tandem fill_exponential_f64",
+                best_gibs(N * 8, [&] { tandem::fill_exponential_f64(key, 0, 32, f64, N); }));
 
     curandGenerator_t g;
     curandCreateGenerator(&g, CURAND_RNG_PSEUDO_PHILOX4_32_10);

@@ -380,7 +380,7 @@ TANDEM_FN float sqrt_(float x) { return std::sqrt(x); }
  * compiler and target gives the same bits, as in tandem-c. Without a fused instruction std::fma
  * is a correct but slow library call that cannot vectorize: build with -mfma on x86. */
 TANDEM_FN double fmad(double x, double y, double z) { return std::fma(x, y, z); }
-inline float fmaf_(float x, float y, float z) { return std::fma(x, y, z); }
+TANDEM_FN float fmaf_(float x, float y, float z) { return std::fma(x, y, z); }
 
 TANDEM_FN uint64_t f64_bits(double x) {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
@@ -397,6 +397,24 @@ TANDEM_FN double f64_from_bits(uint64_t b) {
 #else
     double x;
     std::memcpy(&x, &b, 8);
+    return x;
+#endif
+}
+TANDEM_FN uint32_t f32_bits(float x) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return __float_as_uint(x);
+#else
+    uint32_t b;
+    std::memcpy(&b, &x, 4);
+    return b;
+#endif
+}
+TANDEM_FN float f32_from_bits(uint32_t b) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return __uint_as_float(b);
+#else
+    float x;
+    std::memcpy(&x, &b, 4);
     return x;
 #endif
 }
@@ -535,6 +553,33 @@ TANDEM_FN float box_muller_f32(float a, float b) {
 #else
     return box_muller2_f32(a, b).z0;
 #endif
+}
+
+/* Standard exponential -ln(1 - u) of a uniform u (spec Appendix A), on a host and on a device,
+ * with the logarithm of the host normals: -ln x = (2 nk ln 2 - 4 s p) / 2, and the halving is
+ * exact. Every multiply-add is an explicit fma and no plain product feeds a plain sum, so
+ * contraction cannot change the bits, and every host and device returns tandem-c's values. A
+ * device build with -use_fast_math or -prec-div=false rounds the division differently. */
+TANDEM_FN double exponential_f64(double u) {
+    using detail::fmad;
+    uint64_t ix = detail::f64_bits(1.0 - u) + 0x00095f6200000000u;
+    double nk = (double)(1023 - (int32_t)(ix >> 52)); /* -k */
+    double mant = detail::f64_from_bits((ix & 0x000fffffffffffffu) + 0x3fe6a09e00000000u);
+    double s = (mant - 1.0) / (mant + 1.0), zz = s * s;
+    double p = fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, 0.08312363319426472,
+               0.09070001083303751), 0.11111433317907482), 0.14285712049336274),
+               0.2000000000566491), 0.33333333333331017), 1.0);
+    return 0.5 * fmad(nk, 3.816429394731813e-10, fmad(nk, 1.3862943607382476, (s * -4.0) * p));
+}
+
+TANDEM_FN float exponential_f32(float u) {
+    using detail::fmaf_;
+    uint32_t ix = detail::f32_bits(1.0f - u) + 0x004afb0du;
+    float nk = (float)(127 - (int32_t)(ix >> 23)); /* -k */
+    float mant = detail::f32_from_bits((ix & 0x007fffffu) + 0x3f3504f3u);
+    float s = (mant - 1.0f) / (mant + 1.0f), zz = s * s;
+    float p = fmaf_(zz, fmaf_(zz, fmaf_(zz, 0.14275366f, 0.20000061f), 0.33333334f), 1.0f);
+    return 0.5f * fmaf_(nk, 2.857213530660374e-06f, fmaf_(nk, 1.38629150390625f, (s * -4.0f) * p));
 }
 
 TANDEM_FN bool operator==(const Key &a, const Key &b) {
@@ -700,6 +745,11 @@ template <class D> class Draws {
         return box_muller2_f32(a, frand());
     }
     TANDEM_FN double normal(double mean, double std_dev = 1.0) { return mean + std_dev * normal(); }
+
+    /* Standard exponential from one Float64 (Float32) draw, bit identical to tandem-c on every
+     * host and device. An exponential fill equals the sequence of these calls. */
+    TANDEM_FN double exponential() { return exponential_f64(drand()); }
+    TANDEM_FN float exponentialf() { return exponential_f32(frand()); }
 
     /* Random access: element i of the fill that would start here, without advancing. */
     TANDEM_FN uint32_t at_urand(uint64_t i) const { return (uint32_t)at(i, 32); }

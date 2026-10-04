@@ -10,8 +10,11 @@
 #include "../tandem.cuh"
 #include "vectors.h"
 #include "cross_fill_below.h"
+#include "cross_fill_exponential.h"
 #include "cross_fill_normal.h"
-#include "tests/cross_normal.h" // tandem-c's, through -I$(TANDEM_C)
+// tandem-c's, through -I$(TANDEM_C)
+#include "tests/cross_exponential.h"
+#include "tests/cross_normal.h"
 
 extern "C" {
 #include "tandem.h"
@@ -323,6 +326,8 @@ struct ApiOut {
     double atf64[API_AT];
     float normalf[API_N], pairf[2 * API_N];
     double pair[2 * API_N];
+    double expo[API_N];
+    float expof[API_N];
     uint64_t fork[API_CHILD], split, sub, pos;
 };
 
@@ -342,6 +347,8 @@ __global__ void api_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, u
         o->u8[i] = r.next_u8();
         o->u16[i] = r.next_u16();
         o->f16[i] = r.next_f16_bits();
+        o->expo[i] = r.exponential();
+        o->expof[i] = r.exponentialf();
     }
     for (size_t i = 0; i < API_AT; i++) {
         o->at32[i] = r.at_urand(i);
@@ -358,7 +365,7 @@ __global__ void api_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, u
 }
 
 // The device generator matches the C library on every draw it shares, in one mixed sequence.
-// Normals agree to libm precision, everything else bit for bit.
+// f32 normals agree to libm precision, everything else bit for bit.
 static void check_device_api(const uint32_t key[4], uint64_t pos, uint32_t K, uint32_t range32,
                              uint64_t range64) {
     ApiOut *d;
@@ -392,6 +399,9 @@ static void check_device_api(const uint32_t key[4], uint64_t pos, uint32_t K, ui
         bad += g.u8[i] != tandem_next_u8(&c);
         bad += g.u16[i] != tandem_next_u16(&c);
         bad += g.f16[i] != tandem_next_f16_bits(&c);
+        double e = tandem_exponential_f64(&c);
+        float ef = tandem_exponential_f32(&c);
+        bad += std::memcmp(&g.expo[i], &e, 8) != 0 || std::memcmp(&g.expof[i], &ef, 4) != 0;
     }
     for (size_t i = 0; i < API_AT; i++) {
         bad += g.at32[i] != tandem_at_u32(&c, i);
@@ -813,6 +823,70 @@ static void test_normal() {
         gen, "f32", 4 * 0x1p-23);
 }
 
+// Exponential fills: element i is -ln(1 - u) of uniform draw i, the same polynomial arithmetic as
+// tandem-c's fill, so the device output equals tandem_fill_exponential_* byte for byte at every
+// start slot, K and length, the end positions included.
+template <class T, void (*cfill)(tandem_rng *, T *, size_t), unsigned W,
+          uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
+static void check_exponential(std::mt19937_64 &gen, const char *label) {
+    for (int trial = 0; trial < 60; trial++) {
+        uint32_t key[4];
+        for (auto &w : key) w = (uint32_t)gen();
+        uint32_t K = 1u << (gen() % 8);
+        uint64_t pos = (gen() % (1u << 20)) & ~(uint64_t)127;
+        pos += (W / 4) * (trial % (128 / W)) + (trial % 3 == 0 ? 7 : 0); // every draw slot
+        size_t n = trial == 0 ? (size_t)1 << 22 : (size_t)(gen() % (trial < 40 ? 3000 : 100000));
+        tandem_rng c = tandem_from_key(key, pos, K);
+        std::vector<T> want(n);
+        cfill(&c, want.data(), n);
+        dev<T> d(n + 2);
+        uint64_t end = launch(key, pos, K, d.p, n, 0);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<T> got = d.host();
+        CHECK(end == tandem_position(&c));
+        if (std::memcmp(got.data(), want.data(), n * sizeof(T)) != 0) {
+            std::printf("FAIL %s exponential fill differs (trial %d K=%u pos=%llu n=%zu)\n", label,
+                        trial, K, (unsigned long long)pos, n);
+            failures++;
+        }
+    }
+}
+
+static void test_exponential() {
+    std::mt19937_64 gen(2718);
+    check_exponential<double, tandem_fill_exponential_f64, 64, tandem::fill_exponential_f64>(gen, "f64");
+    check_exponential<float, tandem_fill_exponential_f32, 32, tandem::fill_exponential_f32>(gen, "f32");
+}
+
+// The exponential fixtures of this repository and of tandem-c, bit for bit on the device.
+template <class T, class F, uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
+static void check_cross_exponential(const F &f) {
+    dev<T> d(f.n);
+    launch(CROSS_FILL_KEY, f.pos, 32, d.p, f.n, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CHECK(std::memcmp(d.host().data(), f.out, f.n * sizeof(T)) == 0);
+}
+
+static void test_cross_exponential() {
+    for (const auto &f : CROSS_EXP64)
+        check_cross_exponential<double, cross_exp64, tandem::fill_exponential_f64>(f);
+    for (const auto &f : CROSS_EXP32)
+        check_cross_exponential<float, cross_exp32, tandem::fill_exponential_f32>(f);
+    // tandem-c's tests/cross_exponential.h: the Rng(42) exponentials from each start position.
+    for (const auto &f : CROSS_EXPONENTIAL) {
+        dev<double> d(CROSS_EXPONENTIAL_COUNT);
+        CHECK(tandem::fill_exponential_f64(CROSS_FILL_KEY, f.start, 32, d.p, CROSS_EXPONENTIAL_COUNT) == f.end_pos);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CHECK(std::memcmp(d.host().data(), f.want, sizeof f.want) == 0);
+    }
+    for (const auto &f : CROSS_EXPONENTIALF) {
+        dev<float> d(CROSS_EXPONENTIAL_COUNT);
+        CHECK(tandem::fill_exponential_f32(CROSS_FILL_KEY, f.start, 32, d.p, CROSS_EXPONENTIAL_COUNT) == f.end_pos);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CHECK(std::memcmp(d.host().data(), f.want, sizeof f.want) == 0);
+    }
+}
+
 // Successive generator fills continue one stream: the same values and positions as the C
 // generator makes through the same sequence of fills, with every width mixed.
 static void test_generator() {
@@ -833,6 +907,8 @@ static void test_generator() {
     g.fill_f32(df.p, 9);
     g.fill_u32_below(6, d32.p + 100, 50);
     g.fill_normal_f64(dz.p + 100, 77);
+    g.fill_exponential_f32(df.p + 100, 19);
+    g.fill_exponential_f64(dz.p + 200, 23);
     g.fill_u16(reinterpret_cast<uint16_t *>(d8.p + 64), 11);
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -857,6 +933,8 @@ static void test_generator() {
             if (2 * j + 1 < 77) wz[100 + 2 * j + 1] = z.z1;
         }
     }
+    tandem_fill_exponential_f32(&c, wf.data() + 100, 19);
+    tandem_fill_exponential_f64(&c, wz.data() + 200, 23);
     tandem_fill_u16(&c, w16.data(), 11);
 
     auto h32 = d32.host();
@@ -873,6 +951,8 @@ static void test_generator() {
     CHECK(std::memcmp(h8.data() + 64, w16.data(), 22) == 0);
     for (size_t i = 0; i < 77; i++)
         CHECK(hz[100 + i] == wz[100 + i]);
+    CHECK(std::memcmp(hf.data() + 100, wf.data() + 100, 19 * 4) == 0);
+    CHECK(std::memcmp(hz.data() + 200, wz.data() + 200, 23 * 8) == 0);
     CHECK(g.pos == tandem_position(&c));
     CHECK(g.K == 16);
 
@@ -881,7 +961,7 @@ static void test_generator() {
     CHECK(words_equal(s.key, tandem::device_rng::seed(42, 0, 32).key));
 }
 
-// An empty normal or bounded fill consumes no draws, so it leaves an unaligned position alone.
+// An empty normal, exponential or bounded fill consumes no draws, so it leaves an unaligned position alone.
 static void test_empty_fills() {
     const uint32_t key[4] = {1, 2, 3, 4};
     dev<float> f(4);
@@ -891,11 +971,14 @@ static void test_empty_fills() {
     for (uint64_t pos : {0ull, 1ull, 33ull, 64ull, 65ull, 1001ull}) {
         CHECK(tandem::fill_normal_f64(key, pos, 32, d.p, 0) == pos);
         CHECK(tandem::fill_normal_f32(key, pos, 32, f.p, 0) == pos);
+        CHECK(tandem::fill_exponential_f64(key, pos, 32, d.p, 0) == pos);
+        CHECK(tandem::fill_exponential_f32(key, pos, 32, f.p, 0) == pos);
         CHECK(tandem::fill_u32_below(key, pos, 32, 6, u.p, 0) == pos);
         CHECK(tandem::fill_u64_below(key, pos, 32, 6, w.p, 0) == pos);
     }
     tandem::generator g = tandem::generator::from_key(key, 65, 32);
     g.fill_normal_f64(d.p, 0);
+    g.fill_exponential_f32(f.p, 0);
     g.fill_u32_below(6, u.p, 0);
     CHECK(g.pos == 65);
 }
@@ -946,6 +1029,8 @@ int main(int argc, char **argv) {
     test_cut_below();
     test_normal();
     test_cross_normal();
+    test_exponential();
+    test_cross_exponential();
     test_generator();
     test_empty_fills();
     if (failures) {

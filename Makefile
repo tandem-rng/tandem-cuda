@@ -32,7 +32,7 @@ build: tests/test_cuda tests/test_thrust tools/bench
 tandem_c.o: $(TANDEM_C)/tandem.c $(TANDEM_C)/tandem.h
 	$(CC) -std=c99 -O2 -ffp-contract=off $(FMAFLAGS) -c -o $@ $<
 
-tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(TANDEM_C)/tests/cross_normal.h $(HEADERS) tandem_c.o
+tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h $(TANDEM_C)/tests/cross_normal.h $(TANDEM_C)/tests/cross_exponential.h $(HEADERS) tandem_c.o
 	$(NVCC) $(NVCCFLAGS) -Iinclude -I$(TANDEM_C) -o $@ tests/test_cuda.cu tandem_c.o $(LINK)
 
 tests/test_thrust: tests/test_thrust.cu tandem_thrust.cuh $(HEADERS)
@@ -55,7 +55,7 @@ bench: tools/bench
 # conda environment's by default. Only the tests are built, with the same sources as nvcc.
 CUDA_PATH ?= $(CONDA_PREFIX)
 CLANGCUDA_STD ?= c++20
-tests/test_clangcuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h $(TANDEM_C)/tests/cross_normal.h $(HEADERS) tandem_c.o
+tests/test_clangcuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h $(TANDEM_C)/tests/cross_normal.h $(TANDEM_C)/tests/cross_exponential.h $(HEADERS) tandem_c.o
 	$(HOSTCXX) --cuda-path=$(CUDA_PATH) -Wno-unknown-cuda-version -isystem $(CUDA_PATH)/targets/x86_64-linux/include \
 	  --cuda-gpu-arch=sm_80 -std=$(CLANGCUDA_STD) -O3 -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ \
 	  -x cuda tests/test_cuda.cu -x none tandem_c.o -L$(CUDA_PATH)/lib -L$(CUDA_PATH)/targets/x86_64-linux/lib \
@@ -66,7 +66,7 @@ clangcuda: tests/test_clangcuda
 
 # core.hpp must stay valid C++17 for its other consumers, so this build pins the standard. The
 # test checks that the normals hash to tandem-c's tests/test_normal_bits.c value.
-tests/host_core: tests/host_core.cpp include/tandem/core.hpp tests/cross_fill_below.h tests/cross_fill_normal.h tandem_c.o
+tests/host_core: tests/host_core.cpp include/tandem/core.hpp tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h tandem_c.o
 	$(CXX_HOST) -std=c++17 -O2 $(FMAFLAGS) -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ tests/host_core.cpp tandem_c.o
 
 host: tests/host_core
@@ -81,12 +81,14 @@ hostvec:
 vectors:
 	python3 tools/gen_vectors.py $(SPEC_VECTORS) > tests/vectors.h
 
-# Regenerate the bounded-fill fixtures from core.hpp alone, on any host compiler.
+# Regenerate the fill fixtures from core.hpp alone, on any host compiler.
 cross:
 	$(CXX_HOST) -std=c++17 -O1 -Iinclude -o tools/gen_cross_fill_below tools/gen_cross_fill_below.cpp
 	./tools/gen_cross_fill_below > tests/cross_fill_below.h
 	$(CXX_HOST) -std=c++17 -O1 -Iinclude -o tools/gen_cross_fill_normal tools/gen_cross_fill_normal.cpp
 	./tools/gen_cross_fill_normal > tests/cross_fill_normal.h
+	$(CXX_HOST) -std=c++17 -O1 -Iinclude -o tools/gen_cross_fill_exponential tools/gen_cross_fill_exponential.cpp
+	./tools/gen_cross_fill_exponential > tests/cross_fill_exponential.h
 
 clean:
-	rm -f tandem_c.o tests/test_clangcuda tests/test_thrust tests/test_cuda tests/host_core tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal
+	rm -f tandem_c.o tests/test_clangcuda tests/test_thrust tests/test_cuda tests/host_core tools/bench tools/gen_cross_fill_below tools/gen_cross_fill_normal tools/gen_cross_fill_exponential

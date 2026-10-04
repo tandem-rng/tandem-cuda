@@ -1,6 +1,7 @@
 // core.hpp on a host compiler in C++17, the standard its other consumers (Kokkos, Fortran, torch)
-// build with: the scalar generator and the host Box-Muller agree with the C library, bit for bit
-// where both use the same polynomial code, and with libm and the fixtures to a tolerance.
+// build with: the scalar generator, the host Box-Muller and the exponentials agree with the C
+// library, bit for bit where both use the same polynomial code, and with libm and the fixtures to
+// a tolerance.
 // Run: make host
 #include <cmath>
 #include <cstdio>
@@ -12,6 +13,7 @@ extern "C" {
 #include "tandem.h"
 }
 #include "cross_fill_below.h"
+#include "cross_fill_exponential.h"
 #include "cross_fill_normal.h"
 
 static int bad;
@@ -60,6 +62,26 @@ static uint64_t normal_bits(FILE *dump) {
     return h;
 }
 
+// tandem-c's tests/test_exponential_bits.c from the scalar draws, which equal the fills.
+constexpr uint64_t EXPONENTIAL_BITS_HASH = 0x47f8f98297d94ee2ull;
+
+static uint64_t exponential_bits() {
+    const size_t n = 1000000;
+    const uint64_t starts[] = {0, 1, 77, 12345, 1u << 30};
+    std::vector<double> e(n);
+    std::vector<float> ef(n);
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint64_t s : starts) {
+        tandem::Rng g(2026, 7, 0);
+        g.set_position(s);
+        for (auto &x : e) x = g.exponential();
+        h = fnv(h, e.data(), n * sizeof e[0]);
+        for (auto &x : ef) x = g.exponentialf();
+        h = fnv(h, ef.data(), n * sizeof ef[0]);
+    }
+    return h;
+}
+
 int main(int argc, char **argv) {
     // --dump writes the bytes of tandem-c's tools/dump_normals, for cmp against it.
     if (argc > 1 && std::strcmp(argv[1], "--dump") == 0) return normal_bits(stdout), 0;
@@ -71,6 +93,8 @@ int main(int argc, char **argv) {
         bad += r.urand64(3000000000000ull) != tandem_u64_below(&c, 3000000000000ull);
         bad += r.normal() != tandem_normal_f64(&c);
         bad += r.normalf() != tandem_normal_f32(&c);
+        bad += r.exponential() != tandem_exponential_f64(&c);
+        bad += r.exponentialf() != tandem_exponential_f32(&c);
         double cz[2];
         tandem_normal2_f64(&c, cz);
         auto p = r.normal2();
@@ -137,6 +161,26 @@ int main(int argc, char **argv) {
             bad += v != f.out[i];
         }
     }
+    for (const auto &f : CROSS_EXP64) {
+        tandem::Rng q = root;
+        q.set_position(f.pos);
+        tandem_rng g = tandem_from_key(CROSS_FILL_KEY, f.pos, 32);
+        double seq[64], fill[64];
+        for (unsigned i = 0; i < f.n; i++) seq[i] = q.exponential();
+        tandem_fill_exponential_f64(&g, fill, f.n);
+        bad += std::memcmp(seq, f.out, f.n * 8) != 0 || std::memcmp(fill, f.out, f.n * 8) != 0;
+        bad += q.position() != tandem_position(&g);
+    }
+    for (const auto &f : CROSS_EXP32) {
+        tandem::Rng q = root;
+        q.set_position(f.pos);
+        tandem_rng g = tandem_from_key(CROSS_FILL_KEY, f.pos, 32);
+        float seq[64], fill[64];
+        for (unsigned i = 0; i < f.n; i++) seq[i] = q.exponentialf();
+        tandem_fill_exponential_f32(&g, fill, f.n);
+        bad += std::memcmp(seq, f.out, f.n * 4) != 0 || std::memcmp(fill, f.out, f.n * 4) != 0;
+        bad += q.position() != tandem_position(&g);
+    }
     // The bounded fill fixtures, with rejections keyed by the global draw index at nonzero
     // starts, are the C library's fills.
     auto below32_ok = [](uint64_t start, uint32_t range, const uint32_t *want) {
@@ -155,6 +199,11 @@ int main(int argc, char **argv) {
     for (const auto &f : CROSS_BELOW64) bad += !below64_ok(0, f.range, f.out);
     for (const auto &f : CROSS_BELOW32_AT) bad += !below32_ok(f.start, f.range, f.out);
     for (const auto &f : CROSS_BELOW64_AT) bad += !below64_ok(f.start, f.range, f.out);
+
+    uint64_t he = exponential_bits();
+    bad += he != EXPONENTIAL_BITS_HASH;
+    std::printf("exponential bits: hash %016llx, expected %016llx\n", (unsigned long long)he,
+                (unsigned long long)EXPONENTIAL_BITS_HASH);
 
     uint64_t h = normal_bits(nullptr);
     bad += h != NORMAL_BITS_HASH;

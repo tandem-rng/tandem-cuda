@@ -35,6 +35,9 @@ It produces the stream the specification defines, bit for bit.
 - `tandem::fill_normal_f64/f32(key, pos, K, out, n, stream)`: `n` standard normals, both
   Box-Muller halves per two uniforms, as the flattened `Rng::normal2()` or `normalf2()`
   calls. Not part of the specification.
+- `tandem::fill_exponential_f64/f32(key, pos, K, out, n, stream)`: `n` standard exponentials
+  `-ln(1 - u)`, one uniform each, as `Rng::exponential()` or `exponentialf()` calls, bit
+  identical to tandem-c. Not part of the specification.
 - `tandem::generator`: a host handle with public `key`, `pos` and `K`, built by `from_key` or
   `seed`. Its `fill_*` methods (every fill above, with the range first for the bounded ones) take
   the output pointer, `n` and a stream, fill from `pos`, and set `pos` to the position the
@@ -45,9 +48,11 @@ It produces the stream the specification defines, bit for bit.
   draws follow the specification's scalar rule for the same key and position, mixed widths
   included. The rest of the draw API is `tandem::Rng`'s, shared through `Draws<D>` in
   `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`/`normal2()`
-  and `normalf()`/`normalf2()` by Box-Muller (the `f` forms in float from two f32 uniforms), `at_urand/urand64/frand/drand(i)`, `child`, `split`, `sub` and `fork`.
-  Bounded draws and normals are not part of the specification. They match `tandem_u32_below`,
-  `tandem_u64_below` and `tandem_normal_f64` of the C library.
+  and `normalf()`/`normalf2()` by Box-Muller (the `f` forms in float from two f32 uniforms),
+  `exponential()` and `exponentialf()`, `at_urand/urand64/frand/drand(i)`, `child`, `split`,
+  `sub` and `fork`. Bounded draws, normals and exponentials are not part of the specification.
+  They match `tandem_u32_below`, `tandem_u64_below`, `tandem_normal_f64` and
+  `tandem_exponential_f64` and `_f32` of the C library.
 - `tandem_thrust.cuh`: Thrust and CUB adapters. `tandem::uniform<T>` (u32, u64, f32, f64),
   `tandem::below<T>` (u32, u64) and `tandem::normal<T>` (f32, f64) are functors from an index `i`
   to element `i` of the fill of the same type, built on the device generator's random access.
@@ -58,7 +63,7 @@ It produces the stream the specification defines, bit for bit.
 - `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
   from `core.hpp`.
 
-## Bounded and normal fills
+## Bounded, normal and exponential fills
 
 These fills are not part of the specification. Other ports should follow the same contract,
 and the C library's `tandem_fill_u32_below` and `tandem_fill_u64_below` give the same values bit
@@ -104,6 +109,20 @@ where `sincospif` is not. The uniforms are exact, and everything else in this li
 bit. `tests/cross_fill_normal.h` holds normal fixtures for ports at even and odd starts, from the
 host polynomial code: host builds match them exactly, devices to the tolerances above.
 
+**Exponentials.** `fill_exponential_f64` writes element `i` as `-ln(1 - u)` of Float64 draw `i` of
+the fill that starts at `pos` aligned up to 64 bits, and `fill_exponential_f32` the same in float
+on Float32 draws aligned up to 32 bits, as Appendix A of the specification defines them. A fill
+consumes `n` draws, equals the `Rng::exponential()` (`exponentialf()`) calls, and an empty fill
+returns `pos` unchanged. `tandem::exponential_f64` and `exponential_f32` in `core.hpp` compute the
+logarithm of the f64 and f32 Box-Muller steps on hosts and devices: no libm call, every multiply-add
+an explicit `std::fma`, and no plain product feeding a plain sum. Device contraction therefore
+cannot change the bits, and every host and device returns tandem-c's values, which the tests check
+byte for byte. Building device code with `-use_fast_math` or `-prec-div=false` changes the
+division and breaks that. The maximum error is 1.1e-15 relative in f64 and 2.8e-7 in f32. The
+fills run the direct kernel, because the map makes them compute bound and the tile kernel's
+separate write phase lost 7 to 13 % on the A100. `tests/cross_fill_exponential.h` holds fixtures
+for ports at five start positions, unaligned ones included.
+
 **Bounded integers.** Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
 Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
 `2^32 mod range` (or its 64-bit analogue), result the high word. The threshold `2^32 mod range` is computed once per fill, not per element, which took
@@ -141,6 +160,7 @@ pos = tandem::fill_u32_below(key, pos, 32, 6, die, n);
 float *z;                                            // standard normals
 cudaMalloc(&z, n * sizeof(float));
 pos = tandem::fill_normal_f32(key, pos, 32, z, n);
+pos = tandem::fill_exponential_f32(key, pos, 32, z, n); // standard exponentials, in place of z
 
 tandem::generator g = tandem::generator::seed(42);   // the same, with the position kept for you
 g.fill_f64(x, n);
@@ -202,13 +222,18 @@ reference too. A bounded fill cut at a random element, at ranges that reject abo
 equals the whole fill for both widths, the fused low-bound and wider outputs and the generator. Normal fills are compared with the host Box-Muller step on the C library's uniform fills, at
 every start slot, odd and even `n`, bit for bit (f64) and to 16 ulps + 1e-6 (f32, 4 ulps with
 `TANDEM_PRECISE_F32_NORMAL`), and with `tests/cross_fill_normal.h` and tandem-c's
-`tests/cross_normal.h`, f64 bit for bit. A generator is checked by running mixed fills of every width through it and through the C
+`tests/cross_normal.h`, f64 bit for bit. Exponential fills equal tandem-c's
+`tandem_fill_exponential_f64` and `_f32` byte for byte at random keys, `K`, start slots and
+lengths up to 2^22, and match `tests/cross_fill_exponential.h` and tandem-c's
+`tests/cross_exponential.h` exactly. The device generator's `exponential()` and `exponentialf()`
+equal the C library's scalar draws. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `tests/host_core.cpp` (`make host`) builds `core.hpp` as C++17 with clang and
 gcc and compares the scalar generator with the C library, because tandem-kokkos, tandem-fortran
 and tandem-torch include it with their own standards. It also hashes 1e6 pairs of f64 and f32
-normals from five start positions and checks the value of tandem-c's `tests/test_normal_bits.c`.
+normals from five start positions and checks the value of tandem-c's `tests/test_normal_bits.c`,
+and does the same for 1e6 f64 and 1e6 f32 exponentials against `tests/test_exponential_bits.c`.
 `./tests/host_core --dump` writes the bytes of tandem-c's `tools/dump_normals`: they are identical
 on the M4 with clang and on x86 with clang 19, gcc 11 and gcc 14, with and without `-mfma`.
 
@@ -259,6 +284,8 @@ buffer. The elements are
 | `tandem::fill_normal_f64` | 833 |
 | `tandem::fill_normal_f64`, start at an odd Float64 draw | 679 |
 | `tandem::fill_normal_f32` | 1290 |
+| `tandem::fill_exponential_f64` | 948 |
+| `tandem::fill_exponential_f32` | 1022 |
 | `thrust::transform` of `tandem::uniform<uint32_t>` into a device vector | 65 |
 | `thrust::transform` of `tandem::uniform<double>` into a device vector | 125 |
 | cuRAND Philox4x32-10 `curandGenerate` | 1306 |
@@ -277,7 +304,9 @@ fills run at the fill speed, because a rejection is rare and its retry runs out 
 32-bit range into 8-byte elements gives each thread one 16-byte output slot from two draws, so a
 warp still writes 512 contiguous bytes. Two stores per 16-byte block of draws gave 955 GiB/s. The
 f32 normal fill is memory bound. The f64 one is compute bound on its double-precision step, a
-division, a square root and three polynomials per pair.
+division, a square root and three polynomials per pair. The exponential fills run into the card's
+250 W power cap on their division and logarithm per element, so they vary by up to 15 % between
+runs.
 
 ## AI assistance
 
