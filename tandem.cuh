@@ -144,19 +144,19 @@ template <> struct elem<uint8_t> {
 template <class O> struct elem<below32<O>> {
     using out_t = O;
     static constexpr unsigned bits = 32;
-    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t e, const Ctx &x) {
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t g, const Ctx &x) {
         using U = std::make_unsigned_t<O>;
-        uint32_t v = below_u32_t(w[i], (uint32_t)x.range, (uint32_t)x.thresh, x.key, x.K, e);
+        uint32_t v = below_u32_t(w[i], (uint32_t)x.range, (uint32_t)x.thresh, x.key, x.K, g);
         return (O)(U)((U)x.low + (U)v);
     }
 };
 template <class O> struct elem<below64<O>> {
     using out_t = O;
     static constexpr unsigned bits = 64;
-    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t e, const Ctx &x) {
+    __device__ static out_t make(const uint32_t w[4], unsigned i, uint64_t g, const Ctx &x) {
         using U = std::make_unsigned_t<O>;
         uint64_t v = below_u64_t(w[2 * i] | ((uint64_t)w[2 * i + 1] << 32), x.range, x.thresh,
-                                 x.key, x.K, e);
+                                 x.key, x.K, g);
         return (O)(U)((U)x.low + (U)v);
     }
 };
@@ -182,10 +182,9 @@ __device__ __forceinline__ void store_block(typename elem<E>::out_t *out, uint64
     constexpr unsigned size = elem<E>::bits / 8;
     constexpr unsigned per_block = 16 / size;
     out_t v[per_block];
-    /* Element index i of the block, for the elements inside the output. The difference wraps
-     * for a block that starts before the output, and stays right once i * size is added. */
-    uint64_t d = first - b0;
-    for (unsigned i = 0; i < per_block; i++) v[i] = elem<E>::make(w, i, (d + i * size) / size, x);
+    /* The global draw index of element i, which keys the bounded fallback, so that a fill cut
+     * anywhere equals the whole fill. `first` is a byte of the stream, a multiple of size. */
+    for (unsigned i = 0; i < per_block; i++) v[i] = elem<E>::make(w, i, first / size + i, x);
     if constexpr (sizeof(out_t) != size) {
         /* The output element is wider than its draw. A block inside the output goes out as
          * 16-byte stores when its first element is 16-byte aligned, element stores otherwise. */

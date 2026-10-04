@@ -61,8 +61,8 @@ It produces the stream the specification defines, bit for bit.
 ## Bounded and normal fills
 
 These fills are not part of the specification. Other ports should follow the same contract,
-and the C library's `tandem_fill_u32_below` and `tandem_fill_u64_below` do, up to the rare case
-below.
+and the C library's `tandem_fill_u32_below` and `tandem_fill_u64_below` give the same values bit
+for bit, rejected draws included.
 
 **Normals.** One Box-Muller step turns two uniforms `a`, `b` into two normals,
 `r = sqrt(-2 ln(1 - a))`, `z0 = r cos(2 pi b)`, `z1 = r sin(2 pi b)`. `Rng::normal2()` returns
@@ -108,14 +108,18 @@ Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m`
 large ranges from 1107 to 1348 GiB/s (`u32`) and from 644 to 1351 (`u64`). The fill consumes exactly `n`
 draws, so it returns `align(pos, w) + w n` at once, without waiting for the device. A sequential
 `Rng::urand(range)` loop would consume extra draws after a rejection, and a parallel fill
-cannot know how many. So a rejected draw `e` retries on a fallback stream: draws `0, 1, ...` of
-`split(e)` of `sub(P)` of the fill's generator at position 0 (same key and `K`), with
-`P = 0x424c573332` for 32-bit and `0x424c573634` for 64-bit ranges, until one is accepted.
+cannot know how many. So a rejected element `e` retries on a fallback stream: draws `0, 1, ...`
+of `split(g)` of `sub(P)` of the fill's generator at position 0 (same key and `K`), with
+`P = 0x424c573332` for 32-bit and `0x424c573634` for 64-bit ranges, until one is accepted. `g` is
+the global draw index `align(pos, w) / w + e` (spec Appendix A), so a fill cut at any element
+boundary, each piece starting where the last ended, equals the whole fill.
 Those two purposes are reserved. A rejection has probability `(2^32 mod range) / 2^32`, so
 ranges that are powers of two never reject, and a fill without rejections equals the sequential
 loop. `range = 0` returns 0 and still consumes the draw. `tests/cross_fill_below.h` holds fixtures for
-ports, bounded fills of 64 elements at several ranges from the key of seed 42, `K = 32` and
-position 0, with the rejection counts. Regenerate it with `make cross`, which needs only a host
+ports, bounded fills of 64 elements at several ranges from the key of seed 42, `K = 32`, with the
+rejection counts: `CROSS_BELOW32` and `CROSS_BELOW64` at position 0, where `g = e`, and
+`CROSS_BELOW32_AT` and `CROSS_BELOW64_AT` at the bit positions 1 and 12345 of tandem-c's fixtures,
+where `g` differs from `e`. Regenerate it with `make cross`, which needs only a host
 C++ compiler and `core.hpp`.
 
 ## Use
@@ -191,7 +195,9 @@ generator, with bounded draws at small and at rejecting ranges, normals, `at_*`,
 `split` and `sub`, is compared with the C library, normals to 1e-12 and the rest bit for
 bit. Bounded fills are compared at ranges that reject often, rarely and never, against a
 reference of the contract above written on the C library's generators, and, where nothing
-rejects, against the sequential C bounded draws. Normal fills are compared with the host Box-Muller step on the C library's uniform fills, at
+rejects, against the sequential C bounded draws. The C library's bounded fills must equal that
+reference too. A bounded fill cut at a random element, at ranges that reject about half the draws,
+equals the whole fill for both widths, the fused low-bound and wider outputs and the generator. Normal fills are compared with the host Box-Muller step on the C library's uniform fills, at
 every start slot, odd and even `n`, to 1e-12 (f64) and 16 ulps + 1e-6 (f32, 4 ulps with `TANDEM_PRECISE_F32_NORMAL`), and with
 `tests/cross_fill_normal.h`. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,

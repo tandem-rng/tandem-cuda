@@ -766,10 +766,12 @@ class Rng : public Draws<Rng> {
 
 /* Parallel bounded fills cannot know how many draws earlier elements rejected, so element e
  * of a fill takes the draw at its own index and consumes exactly one draw. A rejected first
- * draw retries with Lemire's rule on the draws of a fallback generator, split(e) of
- * sub(PURPOSE_BELOW32 or 64) of the fill's generator, starting at its position 0. The two
- * purposes are reserved for this. A fill without rejections equals the sequential urand(range)
- * calls. A rejection has probability (2^32 mod range) / 2^32, or the 64-bit analogue. */
+ * draw retries with Lemire's rule on the draws of a fallback generator, split(g) of
+ * sub(PURPOSE_BELOW32 or 64) of the fill's generator at position 0, where g is the global draw
+ * index: the fill's start position aligned to the draw width w, over w, plus e (spec Appendix
+ * A). A fill cut anywhere then equals the whole fill. The two purposes are reserved for this. A
+ * fill without rejections equals the sequential urand(range) calls. A rejection has
+ * probability (2^32 mod range) / 2^32, or the 64-bit analogue. */
 constexpr uint64_t PURPOSE_BELOW32 = 0x424c573332ull; /* "BLW32" */
 constexpr uint64_t PURPOSE_BELOW64 = 0x424c573634ull; /* "BLW64" */
 
@@ -782,10 +784,10 @@ constexpr uint64_t PURPOSE_BELOW64 = 0x424c573634ull; /* "BLW64" */
 #endif
 
 TANDEM_COLD TANDEM_FN uint32_t below_retry_u32(uint32_t range, uint32_t t, const uint32_t key[4],
-                                               uint32_t K, uint64_t e) {
+                                               uint32_t K, uint64_t g) {
     Rng r = Rng::from_key(Key{{key[0], key[1], key[2], key[3]}}, 0, K)
                 .sub(PURPOSE_BELOW32)
-                .split(e);
+                .split(g);
     uint64_t m;
     do
         m = (uint64_t)r.urand() * range;
@@ -794,10 +796,10 @@ TANDEM_COLD TANDEM_FN uint32_t below_retry_u32(uint32_t range, uint32_t t, const
 }
 
 TANDEM_COLD TANDEM_FN uint64_t below_retry_u64(uint64_t range, uint64_t t, const uint32_t key[4],
-                                               uint32_t K, uint64_t e) {
+                                               uint32_t K, uint64_t g) {
     Rng r = Rng::from_key(Key{{key[0], key[1], key[2], key[3]}}, 0, K)
                 .sub(PURPOSE_BELOW64)
-                .split(e);
+                .split(g);
     uint64_t x, lo;
     do {
         x = r.urand64();
@@ -813,28 +815,28 @@ TANDEM_FN uint64_t below_threshold_u64(uint64_t range) { return range ? (0u - ra
 
 /* With the threshold t given, so the division stays out of the per-element path. */
 TANDEM_FN uint32_t below_u32_t(uint32_t u, uint32_t range, uint32_t t, const uint32_t key[4],
-                               uint32_t K, uint64_t e) {
+                               uint32_t K, uint64_t g) {
     uint64_t m = (uint64_t)u * range;
     if ((uint32_t)m < t)
-        return below_retry_u32(range, t, key, K, e);
+        return below_retry_u32(range, t, key, K, g);
     return (uint32_t)(m >> 32);
 }
 
 TANDEM_FN uint64_t below_u64_t(uint64_t x, uint64_t range, uint64_t t, const uint32_t key[4],
-                               uint32_t K, uint64_t e) {
+                               uint32_t K, uint64_t g) {
     if (x * range < t)
-        return below_retry_u64(range, t, key, K, e);
+        return below_retry_u64(range, t, key, K, g);
     return mulhi64(x, range);
 }
 
 TANDEM_FN uint32_t below_u32(uint32_t u, uint32_t range, const uint32_t key[4], uint32_t K,
-                             uint64_t e) {
-    return below_u32_t(u, range, below_threshold_u32(range), key, K, e);
+                             uint64_t g) {
+    return below_u32_t(u, range, below_threshold_u32(range), key, K, g);
 }
 
 TANDEM_FN uint64_t below_u64(uint64_t x, uint64_t range, const uint32_t key[4], uint32_t K,
-                             uint64_t e) {
-    return below_u64_t(x, range, below_threshold_u64(range), key, K, e);
+                             uint64_t g) {
+    return below_u64_t(x, range, below_threshold_u64(range), key, K, g);
 }
 
 } // namespace tandem

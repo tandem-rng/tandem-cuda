@@ -422,29 +422,37 @@ static void test_device_api() {
 // ---- Bounded and normal fills -----------------------------------------------------------------
 
 // Without a rejection a bounded fill equals the sequential C calls. With one, it follows the
-// contract in core.hpp, written out again here on the C library's own generators.
-static uint32_t ref_below32(const tandem_rng *root, uint32_t u, uint32_t range, uint64_t e) {
+// contract in core.hpp, written out again here on the C library's own generators. g is the
+// global draw index, the aligned start over the draw width plus the element index.
+static uint32_t ref_below32(const tandem_rng *root, uint32_t u, uint32_t range, uint64_t g) {
     uint64_t m = (uint64_t)u * range;
     if ((uint32_t)m < range) {
         uint32_t t = (0u - range) % range;
         if ((uint32_t)m < t) {
-            tandem_rng sb = tandem_sub(root, 0x424c573332ull), f = tandem_split(&sb, e);
+            tandem_rng sb = tandem_sub(root, 0x424c573332ull), f = tandem_split(&sb, g);
             do m = (uint64_t)tandem_next_u32(&f) * range; while ((uint32_t)m < t);
         }
     }
     return (uint32_t)(m >> 32);
 }
 
-static uint64_t ref_below64(const tandem_rng *root, uint64_t x, uint64_t range, uint64_t e) {
+static uint64_t ref_below64(const tandem_rng *root, uint64_t x, uint64_t range, uint64_t g) {
     unsigned __int128 m = (unsigned __int128)x * range;
     if ((uint64_t)m < range) {
         uint64_t t = (0u - range) % range;
         if ((uint64_t)m < t) {
-            tandem_rng sb = tandem_sub(root, 0x424c573634ull), f = tandem_split(&sb, e);
+            tandem_rng sb = tandem_sub(root, 0x424c573634ull), f = tandem_split(&sb, g);
             do m = (unsigned __int128)tandem_next_u64(&f) * range; while ((uint64_t)m < t);
         }
     }
     return (uint64_t)(m >> 64);
+}
+
+static void c_fill_below(tandem_rng *g, uint32_t *out, size_t n, uint32_t range) {
+    tandem_fill_u32_below(g, out, n, range);
+}
+static void c_fill_below(tandem_rng *g, uint64_t *out, size_t n, uint64_t range) {
+    tandem_fill_u64_below(g, out, n, range);
 }
 
 template <class T, class Launch, class Ref>
@@ -458,9 +466,14 @@ static void check_below(std::mt19937_64 &gen, const char *label, T range, Launch
         uint64_t pos = gen() % (1u << 20);
         size_t n = (size_t)(gen() % 30000);
         tandem_rng root = tandem_from_key(key, 0, K), c = tandem_from_key(key, pos, K);
-        std::vector<T> raw(n), want(n);
+        std::vector<T> raw(n), want(n), cwant(n);
         cfill(&c, raw.data(), n);
-        for (size_t e = 0; e < n; e++) want[e] = ref(&root, raw[e], range, e);
+        uint64_t g0 = tandem::align_pos(pos, bits) / bits;
+        for (size_t e = 0; e < n; e++) want[e] = ref(&root, raw[e], range, g0 + e);
+        // The C library's bounded fill implements the same contract.
+        c = tandem_from_key(key, pos, K);
+        c_fill_below(&c, cwant.data(), n, range);
+        CHECK(cwant == want);
         dev<T> d(n + 2);
         uint64_t end = launch(key, pos, K, range, d.p, n);
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -607,6 +620,80 @@ static void test_cross_below() {
         CUDA_CHECK(cudaDeviceSynchronize());
         auto got = d.host();
         CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
+    }
+    for (const auto &f : CROSS_BELOW32_AT) {
+        dev<uint32_t> d(64 + 2);
+        tandem::fill_u32_below(CROSS_FILL_KEY, f.start, 32, f.range, d.p, 64);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        auto got = d.host();
+        CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
+    }
+    for (const auto &f : CROSS_BELOW64_AT) {
+        dev<uint64_t> d(64 + 2);
+        tandem::fill_u64_below(CROSS_FILL_KEY, f.start, 32, f.range, d.p, 64);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        auto got = d.host();
+        CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
+    }
+}
+
+// A bounded fill cut at any element boundary equals the whole fill, rejected draws included,
+// because the fallback is keyed by the global draw index. Each piece starts where the last
+// ended. The fused low-bound and wider-output kernels are covered through `launch`.
+template <class O, class Launch>
+static void check_cut_below(std::mt19937_64 &gen, const char *label, Launch launch) {
+    for (int trial = 0; trial < 8; trial++) {
+        uint32_t key[4];
+        for (auto &w : key) w = (uint32_t)gen();
+        uint32_t K = 1u << (gen() % 8);
+        uint64_t pos = gen() % (1u << 20);
+        size_t n = 1000 + (size_t)(gen() % 20000), k = 1 + (size_t)(gen() % (n - 1));
+        dev<O> whole(n), cut(n);
+        uint64_t end = launch(key, pos, K, whole.p, n);
+        uint64_t mid = launch(key, pos, K, cut.p, k);
+        uint64_t end2 = launch(key, mid, K, cut.p + k, n - k);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<O> a = whole.host(), b = cut.host();
+        CHECK(end == end2);
+        if (a != b) {
+            size_t i = 0;
+            while (a[i] == b[i]) i++;
+            std::printf("FAIL %s cut fill (K=%u pos=%llu n=%zu cut=%zu) element %zu\n", label, K,
+                        (unsigned long long)pos, n, k, i);
+            failures++;
+        }
+    }
+}
+
+static void test_cut_below() {
+    std::mt19937_64 gen(2718);
+    // Ranges just above 2^31 and 2^63 reject about half the draws.
+    check_cut_below<uint32_t>(gen, "u32", [](const uint32_t *k, uint64_t p, uint32_t K, uint32_t *o, size_t n) {
+        return tandem::fill_u32_below(k, p, K, 0x80000001u, o, n);
+    });
+    check_cut_below<uint64_t>(gen, "u64", [](const uint32_t *k, uint64_t p, uint32_t K, uint64_t *o, size_t n) {
+        return tandem::fill_u64_below(k, p, K, 0x8000000000000001ull, o, n);
+    });
+    check_cut_below<int32_t>(gen, "u32->i32", [](const uint32_t *k, uint64_t p, uint32_t K, int32_t *o, size_t n) {
+        return tandem::fill_u32_below(k, p, K, 0x80000001u, (int32_t)-9, o, n);
+    });
+    check_cut_below<int64_t>(gen, "u32->i64", [](const uint32_t *k, uint64_t p, uint32_t K, int64_t *o, size_t n) {
+        return tandem::fill_u32_below(k, p, K, 0x80000001u, (int64_t)-5000000000ll, o, n);
+    });
+    check_cut_below<int64_t>(gen, "u64->i64", [](const uint32_t *k, uint64_t p, uint32_t K, int64_t *o, size_t n) {
+        return tandem::fill_u64_below(k, p, K, 0x8000000000000001ull, (int64_t)-7, o, n);
+    });
+    // The generator handle cuts the same way, each call starting where the last ended.
+    for (int trial = 0; trial < 4; trial++) {
+        size_t n = 5000, k = 1 + (size_t)(gen() % (n - 1));
+        tandem::generator w = tandem::generator::from_key(KEY1234, 4321 + (uint64_t)trial, 32), c = w;
+        dev<uint32_t> a(n), b(n);
+        w.fill_u32_below(0x80000001u, a.p, n);
+        c.fill_u32_below(0x80000001u, b.p, k);
+        c.fill_u32_below(0x80000001u, b.p + k, n - k);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CHECK(a.host() == b.host());
+        CHECK(w.pos == c.pos);
     }
 }
 
@@ -843,6 +930,7 @@ int main(int argc, char **argv) {
     test_below();
     test_below_low();
     test_cross_below();
+    test_cut_below();
     test_normal();
     test_cross_normal();
     test_generator();

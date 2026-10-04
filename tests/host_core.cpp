@@ -11,6 +11,7 @@
 extern "C" {
 #include "tandem.h"
 }
+#include "cross_fill_below.h"
 #include "cross_fill_normal.h"
 
 static int bad;
@@ -136,6 +137,25 @@ int main(int argc, char **argv) {
             bad += !(std::fabs(v - f.out[i]) <= 8 * 0x1p-23f * std::fabs(f.out[i]) + 1e-6f);
         }
     }
+    // The bounded fill fixtures, with rejections keyed by the global draw index at nonzero
+    // starts, are the C library's fills.
+    auto below32_ok = [](uint64_t start, uint32_t range, const uint32_t *want) {
+        tandem_rng g = tandem_from_key(CROSS_FILL_KEY, start, 32);
+        uint32_t out[64];
+        tandem_fill_u32_below(&g, out, 64, range);
+        return std::memcmp(out, want, sizeof out) == 0;
+    };
+    auto below64_ok = [](uint64_t start, uint64_t range, const uint64_t *want) {
+        tandem_rng g = tandem_from_key(CROSS_FILL_KEY, start, 32);
+        uint64_t out[64];
+        tandem_fill_u64_below(&g, out, 64, range);
+        return std::memcmp(out, want, sizeof out) == 0;
+    };
+    for (const auto &f : CROSS_BELOW32) bad += !below32_ok(0, f.range, f.out);
+    for (const auto &f : CROSS_BELOW64) bad += !below64_ok(0, f.range, f.out);
+    for (const auto &f : CROSS_BELOW32_AT) bad += !below32_ok(f.start, f.range, f.out);
+    for (const auto &f : CROSS_BELOW64_AT) bad += !below64_ok(f.start, f.range, f.out);
+
     uint64_t h = normal_bits(nullptr);
     bad += h != NORMAL_BITS_HASH;
     std::printf("normal bits: hash %016llx, expected %016llx\n", (unsigned long long)h,
