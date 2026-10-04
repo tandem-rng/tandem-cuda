@@ -205,15 +205,18 @@ __device__ __forceinline__ void store_block(typename elem<E>::out_t *out, uint64
      * anywhere equals the whole fill. `first` is a byte of the stream, a multiple of size. */
     for (unsigned i = 0; i < per_block; i++) v[i] = elem<E>::make(w, i, first / size + i, x);
     if constexpr (sizeof(out_t) != size) {
-        /* The output element is wider than its draw. A block inside the output goes out as
-         * 16-byte stores when its first element is 16-byte aligned, element stores otherwise. */
-        if (first >= b0 && first + 16 <= b1) {
-            out_t *dst = out + (first - b0) / size;
-            if ((reinterpret_cast<uintptr_t>(dst) & 15u) == 0) {
-                constexpr unsigned vecs = per_block * sizeof(out_t) / 16;
-                for (unsigned k = 0; k < vecs; k++)
-                    reinterpret_cast<uint4 *>(dst)[k] = reinterpret_cast<const uint4 *>(v)[k];
-                return;
+        /* The output element is wider or narrower than its draw. A block inside a wider output
+         * goes out as 16-byte stores when its first element is 16-byte aligned. A narrower one
+         * fills less than 16 bytes, so it takes element stores like a block at an edge. */
+        if constexpr (sizeof(out_t) > size) {
+            if (first >= b0 && first + 16 <= b1) {
+                out_t *dst = out + (first - b0) / size;
+                if ((reinterpret_cast<uintptr_t>(dst) & 15u) == 0) {
+                    constexpr unsigned vecs = per_block * sizeof(out_t) / 16;
+                    for (unsigned k = 0; k < vecs; k++)
+                        reinterpret_cast<uint4 *>(dst)[k] = reinterpret_cast<const uint4 *>(v)[k];
+                    return;
+                }
             }
         }
         for (unsigned i = 0; i < per_block; i++) {

@@ -587,6 +587,17 @@ static void test_below_low() {
         check_below_low<uint64_t>(gen, "u64->u64", r, 0xfffffffffffffff0ull, plain64, l64);
         check_below_low<int64_t>(gen, "u64->i64", r, (int64_t)-7, plain64, l64);
     }
+    // Outputs narrower than the draw, as the JAX FFI stores int8 and int16 bounded draws, through
+    // the tile kernel (K >= 8) and the direct kernel (K < 8).
+    auto narrow = [](const uint32_t *k, uint64_t p, uint32_t K, uint32_t r, auto low, auto *o, size_t n) {
+        using O = std::remove_pointer_t<decltype(o)>;
+        if (n == 0) return p;
+        return tandem::detail::fill<tandem::detail::below32<O>>(
+            k, p, K, o, n, 0, true,
+            tandem::detail::Bound{r, (uint64_t)(int64_t)low, tandem::below_threshold_u32(r)});
+    };
+    check_below_low<uint16_t>(gen, "u32->u16", 1000u, (uint16_t)60000, plain32, narrow);
+    check_below_low<int8_t>(gen, "u32->i8", 100u, (int8_t)-50, plain32, narrow);
     // The threshold is computed once: range 0 returns the low bound and consumes the draws.
     dev<int32_t> z(8);
     CHECK(tandem::fill_u32_below(KEY1234, 0, 32, 0, (int32_t)5, z.p, 8) == 8 * 32);
