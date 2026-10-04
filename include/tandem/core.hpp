@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -318,49 +319,206 @@ struct Key {
     uint32_t w[4];
 };
 
-/* Box-Muller entirely in float from two Float32 draws a and b in [0, 1), with the same branch
- * and the same u = 1 - a in (0, 1] as the Float64 form. Only precise sqrt, log and cos, no
- * fast-math intrinsics. */
-TANDEM_FN float box_muller_f32(float a, float b) {
-    return std::sqrt(-2.0f * std::log(1.0f - a)) * std::cos(2.0f * 3.14159265358979323846f * b);
-}
-
-/* Box-Muller from two Float64 draws a and b in [0, 1): u = 1 - a is in (0, 1]. */
-TANDEM_FN double box_muller(double a, double b) {
-    return std::sqrt(-2.0 * std::log(1.0 - a)) * std::cos(6.283185307179586 * b);
-}
-
-/* Both halves of one Box-Muller step: z0 = r cos(2 pi b), z1 = r sin(2 pi b), with
- * r = sqrt(-2 log(1 - a)). z0 is box_muller(a, b). On a device the angle goes through the
- * precise sincospi(2 b), which needs no range reduction, on a host through cos and sin, so
- * the halves agree across platforms to a few ulps, not bit for bit. */
 template <class T> struct Pair2 {
     T z0, z1;
 };
 
-TANDEM_FN Pair2<double> box_muller2(double a, double b) {
-    double r = std::sqrt(-2.0 * std::log(1.0 - a)), s, c;
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    sincospi(2.0 * b, &s, &c);
+/* Host Box-Muller without libm in the loop, so that a compiler vectorizes a block of pairs. A
+ * pair (a, b) gives r = sqrt(-2 ln(1 - a)) and the normals r cos(2 pi b) and r sin(2 pi b), cos
+ * first. It is the same arithmetic as tandem-c's, so host builds agree bit for bit.
+ *
+ * ln(1 - a): 1 - a is exact and in (0, 1]. Split it as m 2^e with m in [sqrt(1/2), sqrt(2)) by
+ * its exponent bits, then ln m = 2 s (1 + z/3 + z^2/5 + ...) with s = (m - 1) / (m + 1) and
+ * z = s^2 <= 0.0295, a short series that keeps the relative error near the last bit even for a
+ * close to 0.
+ *
+ * cos and sin of 2 pi b: b - q/4 for the nearest quarter turn q is exact, so the angle in
+ * [-pi/4, pi/4] needs no range reduction. Polynomials give cos and sin there, and the quarter
+ * turn is a swap and a sign change. The maximum error is 9.9e-16 relative in f64 and 3.3 ulps in
+ * f32 against libm.
+ *
+ * Contraction is off in the loops and the multiply-adds are explicit where the target has them,
+ * so the vector body and the scalar remainder do the same arithmetic. One out-of-line body per
+ * precision keeps the scalar draws and the fills bit identical. */
+#if defined(__clang__)
+#define TANDEM_FP_NOCONTRACT _Pragma("clang fp contract(off)")
 #else
-    c = std::cos(6.283185307179586 * b);
-    s = std::sin(6.283185307179586 * b);
+#define TANDEM_FP_NOCONTRACT
 #endif
-    return Pair2<double>{r * c, r * s};
+#if defined(__GNUC__) && !defined(__clang__)
+#define TANDEM_NOINLINE_NOFMA __attribute__((noinline, optimize("fp-contract=off")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define TANDEM_NOINLINE_NOFMA __attribute__((noinline))
+#else
+#define TANDEM_NOINLINE_NOFMA
+#endif
+
+namespace detail {
+/* IEEE sqrt that never sets errno, so that a loop around it vectorizes without -fno-math-errno
+ * (glibc's sqrt is otherwise a library call). The argument here is never negative. */
+#if defined(__clang__) && !defined(__CUDACC__) && __has_builtin(__builtin_elementwise_sqrt)
+inline double sqrt_(double x) { return __builtin_elementwise_sqrt(x); }
+inline float sqrt_(float x) { return __builtin_elementwise_sqrt(x); }
+#else
+inline double sqrt_(double x) { return std::sqrt(x); }
+inline float sqrt_(float x) { return std::sqrt(x); }
+#endif
+#if defined(__FP_FAST_FMA)
+inline double fmad(double x, double y, double z) { return std::fma(x, y, z); }
+#else
+inline double fmad(double x, double y, double z) { return x * y + z; }
+#endif
+#if defined(__FP_FAST_FMAF)
+inline float fmaf_(float x, float y, float z) { return std::fma(x, y, z); }
+#else
+inline float fmaf_(float x, float y, float z) { return x * y + z; }
+#endif
+} // namespace detail
+
+/* m pairs of uniforms u[2j], u[2j + 1] in [0, 1) to normals z[2j] (cos half), z[2j + 1] (sin
+ * half). The arrays must not overlap. Host only. */
+TANDEM_NOINLINE_NOFMA inline void normal_block_f64(const double *__restrict u,
+                                                   double *__restrict z, size_t m) {
+    TANDEM_FP_NOCONTRACT
+    using detail::fmad;
+#if defined(__clang__)
+#pragma clang loop interleave_count(8)
+#endif
+    for (size_t j = 0; j < m; j++) {
+        double a = u[2u * j], b = u[2u * j + 1u];
+
+        /* 1 - a = mant 2^k with mant in [sqrt(1/2), sqrt(2)) from the bits: shifting the
+         * exponent field by the bits of sqrt(1/2) makes the mantissa rollover pick k. */
+        double x = 1.0 - a, mant;
+        uint64_t bits, ix;
+        std::memcpy(&bits, &x, 8);
+        ix = bits + 0x00095f6200000000u;
+        double nk = (double)(1023 - (int32_t)(ix >> 52)); /* -k, 32-bit so that x86 vectorizes it */
+        ix = (ix & 0x000fffffffffffffu) + 0x3fe6a09e00000000u;
+        std::memcpy(&mant, &ix, 8);
+        double s = (mant - 1.0) / (mant + 1.0), zz = s * s;
+        double p = fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, fmad(zz, 0.08312363319426472,
+                   0.09070001083303751), 0.11111433317907482), 0.14285712049336274),
+                   0.2000000000566491), 0.33333333333331017), 1.0);
+        /* -2 ln(1 - a) = 2 nk ln 2 - 4 s p, with ln 2 split so that nk * ln2_hi is exact. */
+        double r = detail::sqrt_(fmad(nk, 1.3862943607382476, (s * -4.0) * p) + nk * 3.816429394731813e-10);
+
+        /* Nearest quarter turn q, and the angle left over in [-pi/4, pi/4]. */
+        int64_t q = (int32_t)(b * 4.0 + 0.5); /* in [0, 4], 32-bit conversion for x86 vectors */
+        double f = fmad(-(double)(int32_t)q, 0.25, b), th = f * 6.283185307179586, w = th * th;
+        double hs = fmad(w, fmad(w, fmad(w, fmad(w, fmad(w, 1.5914650986900946e-10,
+                    -2.5051097984389413e-08), 2.755731600073921e-06), -0.00019841269836630226),
+                    0.008333333333330813), -0.16666666666666669);
+        double hc = fmad(w, fmad(w, fmad(w, fmad(w, fmad(w, 2.0665708703855164e-09,
+                    -2.7555858522576447e-07), 2.480158263811954e-05), -0.0013888888882156126),
+                    0.04166666666663108), -0.4999999999999997);
+        double sn = th * fmad(w, hs, 1.0), cs = fmad(w, hc, 1.0);
+
+        /* Rotate by q quarter turns with bit operations: odd q swaps the two, bit 1 of q
+         * negates the sine, and bit 1 of q + 1 negates the cosine. */
+        uint64_t qu = (uint64_t)q, sm = (uint64_t)0 - (qu & 1u), sb, cb, xb, yb;
+        std::memcpy(&sb, &sn, 8);
+        std::memcpy(&cb, &cs, 8);
+        xb = (sb & sm) | (cb & ~sm);
+        yb = (cb & sm) | (sb & ~sm);
+        xb ^= ((qu + 1u) << 62) & 0x8000000000000000u;
+        yb ^= (qu << 62) & 0x8000000000000000u;
+        double cx, sx;
+        std::memcpy(&cx, &xb, 8);
+        std::memcpy(&sx, &yb, 8);
+        z[2u * j] = r * cx;
+        z[2u * j + 1u] = r * sx;
+    }
 }
 
-TANDEM_FN Pair2<float> box_muller2_f32(float a, float b) {
-    float r = std::sqrt(-2.0f * std::log(1.0f - a)), s, c;
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    sincospif(2.0f * b, &s, &c);
-#else
-    /* A float angle 2 pi b is off by up to 2 pi b 2^-24, which sincospif does not suffer, so
-     * the host takes the angle in double and rounds the results. */
-    double ang = 6.283185307179586 * (double)b;
-    c = (float)std::cos(ang);
-    s = (float)std::sin(ang);
+TANDEM_NOINLINE_NOFMA inline void normal_block_f32(const float *__restrict u,
+                                                   float *__restrict z, size_t m) {
+    TANDEM_FP_NOCONTRACT
+    using detail::fmaf_;
+#if defined(__clang__)
+#pragma clang loop interleave_count(8)
 #endif
+    for (size_t j = 0; j < m; j++) {
+        float a = u[2u * j], b = u[2u * j + 1u];
+
+        float x = 1.0f - a, mant;
+        uint32_t bits, ix;
+        std::memcpy(&bits, &x, 4);
+        ix = bits + 0x004afb0du;
+        float nk = (float)(127 - (int32_t)(ix >> 23)); /* -k */
+        ix = (ix & 0x007fffffu) + 0x3f3504f3u;
+        std::memcpy(&mant, &ix, 4);
+        float s = (mant - 1.0f) / (mant + 1.0f), zz = s * s;
+        float p = fmaf_(zz, fmaf_(zz, fmaf_(zz, 0.14275366f, 0.20000061f), 0.33333334f), 1.0f);
+        float r = detail::sqrt_(fmaf_(nk, 1.38629150390625f, (s * -4.0f) * p) + nk * 2.857213530660374e-06f);
+
+        int32_t q = (int32_t)(b * 4.0f + 0.5f);
+        float f = fmaf_(-(float)q, 0.25f, b);
+        /* 2 pi as a float pair, so that the angle is good to the last bit of the float. */
+        float th = fmaf_(f, -1.7484555e-7f, f * 6.2831855f), w = th * th;
+        float hs = fmaf_(w, fmaf_(w, fmaf_(w, 2.72499e-06f, -0.00019840087f), 0.008333332f),
+                         -0.16666667f);
+        float hc = fmaf_(w, fmaf_(w, fmaf_(w, 2.4463761e-05f, -0.0013887589f), 0.04166665f), -0.5f);
+        float sn = th * fmaf_(w, hs, 1.0f), cs = fmaf_(w, hc, 1.0f);
+
+        uint32_t qu = (uint32_t)q, sm = (uint32_t)0 - (qu & 1u), sb, cb, xb, yb;
+        std::memcpy(&sb, &sn, 4);
+        std::memcpy(&cb, &cs, 4);
+        xb = (sb & sm) | (cb & ~sm);
+        yb = (cb & sm) | (sb & ~sm);
+        xb ^= ((qu + 1u) << 30) & 0x80000000u;
+        yb ^= (qu << 30) & 0x80000000u;
+        float cx, sx;
+        std::memcpy(&cx, &xb, 4);
+        std::memcpy(&sx, &yb, 4);
+        z[2u * j] = r * cx;
+        z[2u * j + 1u] = r * sx;
+    }
+}
+
+/* Both halves of one Box-Muller step: z0 = r cos(2 pi b), z1 = r sin(2 pi b), with
+ * r = sqrt(-2 log(1 - a)). On a device the angle goes through the precise sincospi(2 b) and
+ * the log is the device's, on a host it is normal_block_f64 on one pair, the same arithmetic as
+ * a host fill, so devices and hosts agree to a few ulps and hosts agree bit for bit. */
+TANDEM_FN Pair2<double> box_muller2(double a, double b) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    double r = std::sqrt(-2.0 * std::log(1.0 - a)), s, c;
+    sincospi(2.0 * b, &s, &c);
+    return Pair2<double>{r * c, r * s};
+#else
+    double u[2] = {a, b}, z[2];
+    normal_block_f64(u, z, 1);
+    return Pair2<double>{z[0], z[1]};
+#endif
+}
+
+/* The same in float: on a device precise logf and sincospif, on a host normal_block_f32. */
+TANDEM_FN Pair2<float> box_muller2_f32(float a, float b) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    float r = std::sqrt(-2.0f * std::log(1.0f - a)), s, c;
+    sincospif(2.0f * b, &s, &c);
     return Pair2<float>{r * c, r * s};
+#else
+    float u[2] = {a, b}, z[2];
+    normal_block_f32(u, z, 1);
+    return Pair2<float>{z[0], z[1]};
+#endif
+}
+
+/* The cos half alone: Box-Muller from two draws a and b in [0, 1), u = 1 - a in (0, 1]. */
+TANDEM_FN double box_muller(double a, double b) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return std::sqrt(-2.0 * std::log(1.0 - a)) * std::cos(6.283185307179586 * b);
+#else
+    return box_muller2(a, b).z0;
+#endif
+}
+TANDEM_FN float box_muller_f32(float a, float b) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+    return std::sqrt(-2.0f * std::log(1.0f - a)) * std::cos(2.0f * 3.14159265358979323846f * b);
+#else
+    return box_muller2_f32(a, b).z0;
+#endif
 }
 
 TANDEM_FN bool operator==(const Key &a, const Key &b) {

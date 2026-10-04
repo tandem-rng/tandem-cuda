@@ -67,6 +67,8 @@ jobs:
           repository: tandem-rng/tandem-c
           path: tandem-c
       - run: make host TANDEM_C=tandem-c HOSTCC=${{ matrix.cc }} HOSTCXX=${{ matrix.cxx }}
+      - if: matrix.cc == 'clang'
+        run: make hostvec TANDEM_C=tandem-c HOSTCC=clang HOSTCXX=clang++
   vectors:
     name: vector header is current
     runs-on: ubuntu-latest

@@ -22,7 +22,7 @@ CXX_HOST = $(HOSTCXX)
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test thrust bench clangcuda host vectors cross clean
+.PHONY: build test thrust hostvec bench clangcuda host vectors cross clean
 
 build: tests/test_cuda tests/test_thrust tools/bench
 
@@ -62,11 +62,16 @@ clangcuda: tests/test_clangcuda
 	./tests/test_clangcuda tests/data
 
 # core.hpp must stay valid C++17 for its other consumers, so this build pins the standard.
-tests/host_core: tests/host_core.cpp include/tandem/core.hpp tandem_c.o
+tests/host_core: tests/host_core.cpp include/tandem/core.hpp tests/cross_fill_normal.h tandem_c.o
 	$(CXX_HOST) -std=c++17 -O2 -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ tests/host_core.cpp tandem_c.o
 
 host: tests/host_core
 	./tests/host_core
+
+# The host Box-Muller blocks must vectorize under clang, which is what makes them fast.
+hostvec:
+	$(CXX_HOST) -std=c++17 -O2 -Iinclude -I$(TANDEM_C) -Rpass=loop-vectorize -c -o /dev/null tests/host_core.cpp 2>&1 \
+	  | grep "core.hpp" | grep -c "vectorized loop" | awk '{ if ($$1 < 2) { print "normal blocks not vectorized"; exit 1 } else print "normal blocks vectorized" }'
 
 # Regenerate the vector header from a checkout of https://github.com/tandem-rng/spec.
 vectors:
