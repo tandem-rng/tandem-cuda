@@ -356,6 +356,63 @@ inline uint64_t fill_normal(const uint32_t key[4], uint64_t pos, uint32_t K, O *
     return p1;
 }
 
+/* Float normal fill. Element i is Box-Muller in float of the Float32 draws 2i and 2i + 1 of the
+ * fill that starts at the position aligned to 32 bits. With s0 the index of the first Float32
+ * draw, a block holds two elements: slots 0 and 1, 2 and 3 when s0 is even, or slots 3 of the
+ * previous block with 0, and 1 with 2, when s0 is odd. The odd case steps the predecessor chunk
+ * as fill_normal_kernel does. `ba` and `bb` bound the blocks that can hold an element. */
+template <bool ODD>
+__global__ void __launch_bounds__(THREADS)
+    fill_normal32_kernel(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3, uint32_t K,
+                         uint64_t g0, uint64_t s0, uint64_t n, uint64_t ba, uint64_t bb,
+                         float *out) {
+    uint64_t c = 8u * g0 + blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
+    uint64_t g = c >> 3, lane = c & 7u;
+    if (g * K * 8u > bb) return;
+    const uint32_t key[4] = {key0, key1, key2, key3};
+    uint32_t o[4], h[4], po[4] = {0, 0, 0, 0}, ph[4] = {0, 0, 0, 0};
+    F_keyed(key, c, DOMAIN_STREAM, AUX_STREAM, o, h);
+    if (ODD) F_keyed(key, lane ? c - 1u : 8u * g + 7u, DOMAIN_STREAM, AUX_STREAM, po, ph);
+    for (uint32_t j = 0; j < K; j++) {
+        uint64_t beta = (g * K + j) * 8u + lane;
+        if (beta > bb) break;
+        T(o, h);
+        if (ODD && (lane || j)) T(po, ph);
+        if (beta < ba) continue;
+        /* Index of the element that starts at slot 4 beta (or 4 beta - 1), then the next one. */
+        int64_t e = ((int64_t)(4u * beta) - (ODD ? 1 : 0) - (int64_t)s0) / 2;
+        uint32_t q[4];
+        const uint32_t *prev = po;
+        if (ODD && lane == 0 && j == 0 && g > 0) {
+            block(key, 8u * (g - 1u) + 7u, K - 1u, q);
+            prev = q;
+        }
+        if (e >= 0 && e < (int64_t)n)
+            out[e] = ODD ? box_muller_f32(to_f32(prev[3]), to_f32(o[0]))
+                         : box_muller_f32(to_f32(o[0]), to_f32(o[1]));
+        if (e + 1 >= 0 && e + 1 < (int64_t)n)
+            out[e + 1] = ODD ? box_muller_f32(to_f32(o[1]), to_f32(o[2]))
+                             : box_muller_f32(to_f32(o[2]), to_f32(o[3]));
+    }
+}
+
+inline uint64_t fill_normal_f32_impl(const uint32_t key[4], uint64_t pos, uint32_t K,
+                                     float *out, size_t n, cudaStream_t stream) {
+    K = K ? K : DEFAULT_K;
+    uint64_t p0 = align_pos(pos, 32), p1 = p0 + (uint64_t)n * 64u;
+    if (n == 0) return p1;
+    uint64_t s0 = p0 >> 5, ba = s0 >> 2, bb = (s0 + 2u * n - 1u) >> 2;
+    uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K;
+    unsigned blocks = (unsigned)((8u * (g1 - g0 + 1u) + THREADS - 1) / THREADS);
+    if (s0 & 1u)
+        fill_normal32_kernel<true><<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2], key[3],
+                                                                   K, g0, s0, n, ba, bb, out);
+    else
+        fill_normal32_kernel<false><<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2], key[3],
+                                                                    K, g0, s0, n, ba, bb, out);
+    return p1;
+}
+
 /* `tile` selects the shared-memory kernel where K allows; the tests and the bench also run
  * the direct kernel at every K. */
 template <class E>
@@ -472,18 +529,20 @@ inline uint64_t fill_u64_below(const uint32_t key[4], uint64_t pos, uint32_t K, 
     return detail::fill<detail::below64>(key, pos, K, out, n, stream, true, range);
 }
 
-/* Standard normals by Box-Muller, as Rng::normal. Element i is made from the Float64 draws 2i
- * and 2i + 1 of the fill that starts at the position aligned to 64 bits, so the fill consumes
- * 128 n bits and equals n successive Rng::normal() calls. The f32 fill rounds the same
- * doubles. Device log and cos may differ from the host's in the last bit or two. Not part of
- * the specification. */
+/* Standard normals by Box-Muller. fill_normal_f64 is Rng::normal: element i is made from the
+ * Float64 draws 2i and 2i + 1 of the fill that starts at the position aligned to 64 bits, so
+ * the fill consumes 128 n bits and equals n successive Rng::normal() calls. fill_normal_f32 is
+ * Rng::normalf: element i is made in float from the Float32 draws 2i and 2i + 1 of the fill
+ * that starts at the position aligned to 32 bits, 64 n bits in all. Device log and cos differ
+ * from the host's in the last bits, so normals agree to a few ulps, not bit for bit. Not part
+ * of the specification. */
 inline uint64_t fill_normal_f64(const uint32_t key[4], uint64_t pos, uint32_t K, double *out,
                                 size_t n, cudaStream_t stream = 0) {
     return detail::fill_normal(key, pos, K, out, n, stream);
 }
 inline uint64_t fill_normal_f32(const uint32_t key[4], uint64_t pos, uint32_t K, float *out,
                                 size_t n, cudaStream_t stream = 0) {
-    return detail::fill_normal(key, pos, K, out, n, stream);
+    return detail::fill_normal_f32_impl(key, pos, K, out, n, stream);
 }
 
 /* A host handle for a stream: the fills above, with the position kept and advanced here. Fills

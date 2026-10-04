@@ -4,6 +4,7 @@ ARCH ?= -arch=sm_80
 NVCCFLAGS ?= -std=c++17 -O3 $(ARCH) -Xcompiler -Wall,-Wextra
 TANDEM_C ?= ../tandem-c
 SPEC_VECTORS ?= ../tandem-spec/vectors.json
+CXX_HOST ?= c++
 HEADERS := tandem.cuh include/tandem/core.hpp
 
 # nvcc needs a host compiler it knows; a conda toolchain names one through CXX.
@@ -16,14 +17,14 @@ endif
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test bench vectors clean
+.PHONY: build test bench vectors cross clean
 
 build: tests/test_cuda tools/bench
 
 tandem_c.o: $(TANDEM_C)/tandem.c $(TANDEM_C)/tandem.h
 	$(CC) -std=c99 -O2 -c -o $@ $<
 
-tests/test_cuda: tests/test_cuda.cu tests/vectors.h $(HEADERS) tandem_c.o
+tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h $(HEADERS) tandem_c.o
 	$(NVCC) $(NVCCFLAGS) -Iinclude -I$(TANDEM_C) -o $@ tests/test_cuda.cu tandem_c.o $(LINK)
 
 tools/bench: tools/bench.cu $(HEADERS)
@@ -39,5 +40,10 @@ bench: tools/bench
 vectors:
 	python3 tools/gen_vectors.py $(SPEC_VECTORS) > tests/vectors.h
 
+# Regenerate the bounded-fill fixtures from core.hpp alone, on any host compiler.
+cross:
+	$(CXX_HOST) -std=c++17 -O1 -Iinclude -o tools/gen_cross_fill_below tools/gen_cross_fill_below.cpp
+	./tools/gen_cross_fill_below > tests/cross_fill_below.h
+
 clean:
-	rm -f tandem_c.o tests/test_cuda tools/bench
+	rm -f tandem_c.o tests/test_cuda tools/bench tools/gen_cross_fill_below

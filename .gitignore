@@ -3,3 +3,4 @@ tools/bench
 *.o
 .pixi/
 pixi.lock
+tools/gen_cross_fill_below

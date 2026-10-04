@@ -48,17 +48,24 @@ It produces the stream the specification defines, bit for bit.
 
 These fills are not part of the specification. Other ports should follow the same contract,
 and the C library's `tandem_fill_u32_below`, `tandem_fill_u64_below` and
-`tandem_fill_normal_f64/f32` do, up to the rare case below.
+`tandem_fill_normal_f64` do, up to the rare case below.
 
 **Normals.** Element `i` is Box-Muller of the Float64 draws `2i` and `2i + 1` of the Float64
 fill that starts at the same position: `u = 1 - d[2i]`, `v = d[2i + 1]`,
 `sqrt(-2 ln u) cos(2 pi v)`. The fill starts at `pos` aligned up to 64 bits, consumes `128 n`
 bits and returns that position, so it equals `n` calls of `Rng::normal()`. A start at an odd
 Float64 draw makes every element span two blocks, and the kernel steps a second chunk per
-thread to read them, at about 80% of the speed. `fill_normal_f32` rounds the same doubles to
-`float`. It does not use the Float32 draws. The device `log` and `cos` can differ from the host's
-in the last bits, so normals agree across hosts and devices to about 1e-15 relative, not bit
-for bit. Everything else in this library does.
+thread to read them, at about 80% of the speed. The device `log` and `cos` can differ from the
+host's in the last bits, so f64 normals agree across hosts and devices to about 1e-15 relative.
+
+**Float normals.** `fill_normal_f32` is `Rng::normalf()`: element `i` is Box-Muller in float of
+the Float32 draws `2i` and `2i + 1` of the Float32 fill that starts at the same position,
+`sqrt(-2 ln u) cos(2 pi v)` with `u = 1 - d[2i]`, `v = d[2i + 1]`, all in `float` with the precise
+`logf`, `cosf` and `sqrtf`. The fill starts at `pos` aligned up to 32 bits and consumes `64 n`
+bits, so a block holds two elements and a start at an odd Float32 draw makes some span two
+blocks. It does not round the f64 normal. Float normals agree across ports and devices to a few
+ulps, not bit for bit, because libm float functions differ. The uniforms are exact.
+Everything else in this library is bit for bit.
 
 **Bounded integers.** Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
 Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
@@ -70,7 +77,10 @@ cannot know how many. So a rejected draw `e` retries on a fallback stream: draws
 `P = 0x424c573332` for 32-bit and `0x424c573634` for 64-bit ranges, until one is accepted.
 Those two purposes are reserved. A rejection has probability `(2^32 mod range) / 2^32`, so
 ranges that are powers of two never reject, and a fill without rejections equals the sequential
-loop. `range = 0` returns 0.
+loop. `range = 0` returns 0 and still consumes the draw. `tests/cross_fill_below.h` holds fixtures for
+ports, bounded fills of 64 elements at several ranges from the key of seed 42, `K = 32` and
+position 0, with the rejection counts. Regenerate it with `make cross`, which needs only a host
+C++ compiler and `core.hpp`.
 
 ## Use
 
@@ -120,8 +130,9 @@ generator, with bounded draws at small and at rejecting ranges, normals, `at_*`,
 `split` and `sub`, is compared with the C library, normals to 1e-12 and the rest bit for
 bit. Bounded fills are compared at ranges that reject often, rarely and never, against a
 reference of the contract above written on the C library's generators, and, where nothing
-rejects, against the sequential C bounded draws. Normal fills are compared with the C fills,
-at even and odd Float64 starts. A generator is checked by running mixed fills of every width through it and through the C
+rejects, against the sequential C bounded draws. The f64 normal fill is compared with the C
+fill at even and odd Float64 starts, the f32 one with a float reference on the C Float32 draws
+at every start slot, to 4 ulps. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `pixi.toml` provides a CUDA
@@ -131,7 +142,7 @@ returned positions. `pixi.toml` provides a CUDA
 
 NVIDIA A100 40 GB (PCIe), CUDA 12.8, `make bench`: 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
-the run. Consecutive runs agreed within 1%, except `fill_normal_f32` within 3%. The elements are
+the run. Consecutive runs agreed within 1%, except `fill_normal_f64` within 4%. The elements are
 2^28 of each type, so the rows for narrow types write fewer bytes.
 
 | | GiB/s written |
@@ -150,9 +161,9 @@ the run. Consecutive runs agreed within 1%, except `fill_normal_f32` within 3%. 
 | `tandem::fill_bool` (one byte per bit) | 1227 |
 | `tandem::fill_u32_below(1000)` | 1336 |
 | `tandem::fill_u64_below(1000)` | 1348 |
-| `tandem::fill_normal_f64` | 417 |
-| `tandem::fill_normal_f64`, start at an odd Float64 draw | 347 |
-| `tandem::fill_normal_f32` | 211 |
+| `tandem::fill_normal_f64` | 405 |
+| `tandem::fill_normal_f64`, start at an odd Float64 draw | 348 |
+| `tandem::fill_normal_f32` | 540 |
 | cuRAND Philox4x32-10 `curandGenerate` | 1332 |
 | cuRAND Philox4x32-10 `curandGenerateUniform` | 1307 |
 | cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 781 |
@@ -166,8 +177,8 @@ cover one 128-byte line per step. Both kernels pick a 16-byte vector store at co
 when the output's blocks are 16-byte aligned. The bool fill expands each bit to a byte, so it
 stages one step of 32 groups (32 KiB) and writes 1024 contiguous bytes per group. The bounded
 fills run at the fill speed, because a rejection is rare and its retry runs out of line. The
-normal fills are limited by double-precision `log`, `cos` and `sqrt`, about 56 billion elements
-per second, whatever the output type, which is why the `float` row shows half the bytes.
+normal fills are limited by `log`, `cos` and `sqrt`: double precision for `fill_normal_f64`, about
+54 billion elements per second, and float for `fill_normal_f32`, about 70 billion.
 
 ## AI assistance
 

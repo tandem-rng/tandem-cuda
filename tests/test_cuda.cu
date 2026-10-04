@@ -9,6 +9,7 @@
 
 #include "../tandem.cuh"
 #include "vectors.h"
+#include "cross_fill_below.h"
 
 extern "C" {
 #include "tandem.h"
@@ -505,6 +506,25 @@ static void test_below() {
         check_below_sequential<uint64_t, decltype(l64), tandem_u64_below>(gen, "u64", r, l64);
 }
 
+// The fixtures other ports match, which include the fallback stream of rejected draws.
+static void test_cross_below() {
+    CHECK(words_equal(CROSS_FILL_KEY, tandem::device_rng::seed(42, 0, 32).key));
+    for (const auto &f : CROSS_BELOW32) {
+        dev<uint32_t> d(64 + 2);
+        tandem::fill_u32_below(CROSS_FILL_KEY, 0, 32, f.range, d.p, 64);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        auto got = d.host();
+        CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
+    }
+    for (const auto &f : CROSS_BELOW64) {
+        dev<uint64_t> d(64 + 2);
+        tandem::fill_u64_below(CROSS_FILL_KEY, 0, 32, f.range, d.p, 64);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        auto got = d.host();
+        CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
+    }
+}
+
 // Normals equal the C fill, including starts at an odd 64-bit draw, where each element spans two
 // blocks. The device log and cos differ from the host's by a few ulp.
 template <class T, void (*cfill)(tandem_rng *, T *, size_t),
@@ -537,10 +557,42 @@ static void check_normal(std::mt19937_64 &gen, const char *label, double tol) {
     }
 }
 
+// The float fill: element i is Box-Muller in float of the Float32 draws 2i and 2i + 1, from a
+// start aligned to 32 bits, at every start offset modulo 128 bits. Reference on C draws.
+static void check_normal_f32(std::mt19937_64 &gen) {
+    for (int trial = 0; trial < 60; trial++) {
+        uint32_t key[4];
+        for (auto &w : key) w = (uint32_t)gen();
+        uint32_t K = 1u << (gen() % 8);
+        uint64_t pos = (gen() % (1u << 20)) & ~(uint64_t)127;
+        pos += 32 * (trial % 4) + (trial % 3 == 0 ? 7 : 0); // all four slots, some unaligned
+        size_t n = (size_t)(gen() % (trial < 45 ? 3000 : 100000));
+        tandem_rng c = tandem_from_key(key, pos, K);
+        std::vector<float> u(2 * n), want(n);
+        tandem_fill_f32(&c, u.data(), 2 * n);
+        for (size_t i = 0; i < n; i++)
+            want[i] = sqrtf(-2.0f * logf(1.0f - u[2 * i])) *
+                      cosf(2.0f * 3.14159265358979323846f * u[2 * i + 1]);
+        dev<float> d(n + 2);
+        uint64_t end = tandem::fill_normal_f32(key, pos, K, d.p, n, 0);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<float> got = d.host();
+        CHECK(end == tandem::align_pos(pos, 32) + (uint64_t)n * 64u);
+        size_t bad = 0;
+        for (size_t i = 0; i < n; i++)
+            bad += !(std::fabs(got[i] - want[i]) <= 4 * 0x1p-23f * (1.0f + std::fabs(want[i])));
+        if (bad) {
+            std::printf("FAIL f32 normal fill: %zu elements differ (trial %d K=%u pos=%llu n=%zu)\n",
+                        bad, trial, K, (unsigned long long)pos, n);
+            failures++;
+        }
+    }
+}
+
 static void test_normal() {
     std::mt19937_64 gen(8675);
     check_normal<double, tandem_fill_normal_f64, tandem::fill_normal_f64>(gen, "f64", 1e-12);
-    check_normal<float, tandem_fill_normal_f32, tandem::fill_normal_f32>(gen, "f32", 1e-6);
+    check_normal_f32(gen);
 }
 
 // Successive generator fills continue one stream: the same values and positions as the C
@@ -644,6 +696,7 @@ int main(int argc, char **argv) {
     test_signed();
     test_device_api();
     test_below();
+    test_cross_below();
     test_normal();
     test_generator();
     if (failures) {
