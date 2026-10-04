@@ -2,321 +2,38 @@
 
 # tandem-cuda
 
-CUDA implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncryptographic
-pseudorandom number generator built to be fast on CPUs and GPUs alike. Header only. `tandem.cuh` is built as C++23 with CUDA 13.4 and clang 20, and `include/tandem/core.hpp` stays valid C++17.
-It produces the stream the specification defines, bit for bit.
+[![CI](https://github.com/tandem-rng/tandem-cuda/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tandem-rng/tandem-cuda/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-- `tandem.cuh`: the CUDA fills and `device_rng`.
-- `include/tandem/core.hpp`: the portable core that `tandem.cuh` builds on. It holds the
-  step, the seeding function, the stream layout, the float mappings, child keys, an
-  eight-lane row and the scalar generator `tandem::Rng`, without CUDA types. Its functions
-  are `TANDEM_FN`: `KOKKOS_INLINE_FUNCTION` under Kokkos, `__host__ __device__ inline`
-  under nvcc and hipcc, `inline` otherwise.
+Header-only CUDA implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a
+noncryptographic pseudorandom number generator. It produces the stream the specification
+defines, bit for bit, and fills A100 memory at about 1390 GiB/s.
 
-- `tandem::fill_u32/u64/f32/f64(key, pos, K, device_ptr, n, stream)`: fill device memory
-  from a key and stream position, as the specification's fill defines, and return the
-  position after the fill. One thread per chunk walks its `K` blocks. For `K >= 8` a block
-  of 32 groups stages eight steps in shared memory and writes 512 contiguous bytes per
-  warp. For smaller `K` each group stores its own 128-byte line per step.
-- `tandem::fill_u8/u16/f16_bits/bool` take the same arguments. `fill_f16_bits` writes the
-  binary16 bit patterns of the specification's Float16 draws, `(raw >> 5) * 2^-11`, into a
-  `uint16_t` buffer. `fill_bool` writes one byte, 0 or 1, per stream bit. The 8 and 16 bit
-  fills use the tile kernel like the wider ones.
-- `tandem::fill_i8/i16/i32/i64`: the unsigned fill of the same width read in two's
-  complement, as the specification defines signed integers.
-- `tandem::fill_u32_below(key, pos, K, range, out, n, stream)`, `fill_u64_below`: `n` draws
-  uniform on `[0, range)`, as `Rng::urand(range)`. Not part of the specification.
-- `tandem::fill_u32_below(key, pos, K, range, low, out, n, stream)` and `fill_u64_below` with a
-  low bound: `out[e] = low + draw[e]`, summed in the output type and wrapping, so the output
-  can be `uint32_t` or `int32_t`, and for a 32-bit range also `uint64_t` or `int64_t`, which
-  widens the 32-bit draw into an 8-byte element. The draws and the consumed bits are those of the
-  plain fill, and the offset and the widening are fused into the store, so there is no second
-  pass. `fill_u64_below` takes a `uint64_t` or `int64_t` low bound and output.
-- `tandem::fill_normal_f64/f32(key, pos, K, out, n, stream)`: `n` standard normals, both
-  Box-Muller halves per two uniforms, as the flattened `Rng::normal2()` or `normalf2()`
-  calls. Not part of the specification.
-- `tandem::fill_exponential_f64/f32(key, pos, K, out, n, stream)`: `n` standard exponentials
-  `-ln(1 - u)`, one uniform each, as `Rng::exponential()` or `exponentialf()` calls, bit
-  identical to tandem-c. Not part of the specification.
-- `tandem::generator`: a host handle with public `key`, `pos` and `K`, built by `from_key` or
-  `seed`. Its `fill_*` methods (every fill above, with the range first for the bounded ones) take
-  the output pointer, `n` and a stream, fill from `pos`, and set `pos` to the position the
-  fill returns, so successive fills continue one stream without the caller tracking positions.
-- `tandem::device_rng`: a per-thread generator for kernels that draw scalars. It holds the
-  transport form (public fields `key`, `pos`, `K`) and one cached chunk state, about 20
-  registers. `from_key`, `seed`, `skip_to`, `next_bool/u8/u16/u32/u64/f16_bits/f32/f64`. Its
-  draws follow the specification's scalar rule for the same key and position, mixed widths
-  included. The rest of the draw API is `tandem::Rng`'s, shared through `Draws<D>` in
-  `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`/`normal2()`
-  and `normalf()`/`normalf2()` by Box-Muller (the `f` forms in float from two f32 uniforms),
-  `exponential()` and `exponentialf()`, `at_urand/urand64/frand/drand(i)`, `child`, `split`,
-  `sub` and `fork`. Bounded draws, normals and exponentials are not part of the specification.
-  They match `tandem_u32_below`, `tandem_u64_below`, `tandem_normal_f64` and
-  `tandem_exponential_f64` and `_f32` of the C library.
-- `tandem_thrust.cuh`: Thrust and CUB adapters. `tandem::uniform<T>` (u32, u64, f32, f64),
-  `tandem::below<T>` (u32, u64) and `tandem::normal<T>` (f32, f64) are functors from an index `i`
-  to element `i` of the fill of the same type, built on the device generator's random access.
-  `tandem::make_iterator(f, first)` wraps one in a `transform_iterator` over a
-  `counting_iterator`, for `thrust::reduce`, `thrust::copy_n`, `thrust::transform` and CUB. A
-  normal iterator yields the cos half at `2j` and the sin half at `2j + 1` of the uniforms `2j`
-  and `2j + 1`. Header only, and Thrust ships with the toolkit.
-- `tandem::T`, `F`, `F_keyed`, `block`: the specification's building blocks, host and device,
-  from `core.hpp`.
+Copy `tandem.cuh` and `include/tandem/`, or put them on the include path. `tandem.cuh` builds
+as C++23 with CUDA 13.4 and clang 20, and `include/tandem/core.hpp` stays valid C++17.
 
-## Bounded, normal and exponential fills
-
-These fills are not part of the specification. Other ports should follow the same contract,
-and the C library's `tandem_fill_u32_below` and `tandem_fill_u64_below` give the same values bit
-for bit, rejected draws included.
-
-**Normals.** One Box-Muller step turns two uniforms `a`, `b` into two normals,
-`r = sqrt(-2 ln(1 - a))`, `z0 = r cos(2 pi b)`, `z1 = r sin(2 pi b)`. `Rng::normal2()` returns
-the pair `(z0, z1)`, `Rng::normal()` its first half, and both consume two Float64 uniforms. A
-fill of `n` normals is the flattened sequence of `normal2` calls: pair `j`, the elements `2j` and
-`2j + 1`, comes from the Float64 draws `2j` and `2j + 1` of the Float64 fill that starts at the
-same position. The fill starts at `pos` aligned up to 64 bits and consumes `2 ceil(n / 2)`
-draws, so an odd `n` uses the cos half of its last pair and still advances past both draws. An empty
-normal or bounded fill consumes nothing and returns `pos` unchanged, even when `pos` is unaligned. A
-start at an odd Float64 draw makes every pair span two blocks, and the kernel steps a second
-chunk per thread to read them, at about 80% of the speed. Devices and hosts run the same
-polynomial step below, so f64 normals agree bit for bit on every platform, and with tandem-c.
-
-`box_muller2` in `core.hpp`, on a device and on a host, and `box_muller2_f32` on a host do not
-call libm. They are the polynomial form of tandem-c: the logarithm from the exponent bits and a short series, and the
-sine and cosine from an exact quarter-turn reduction and polynomials, at most 9.9e-16 relative in
-f64 and 3.3 ulps in f32 against libm. Every multiply-add is an explicit `std::fma` and contraction
-is off, as in tandem-c, so every host compiler and target gives the C library's bits, and a scalar
-`normal2()` equals a pair of a fill. The f64 step `tandem::normal_pair_f64` is inlined into the
-device kernels too: no plain product feeds a plain sum except an exact one, so device contraction
-cannot change the bits. It took the A100 f64 fill from 706 GiB/s with `log` and `sincospi` to 833. `tandem::normal_block_f64` and `normal_block_f32` turn arrays
-of uniforms into normals for host fills, and clang vectorizes them on Arm and on x86 without
-`-ffast-math` (`make hostvec` checks it). x86 needs `-mfma` (the Makefile passes `-mavx2 -mfma`),
-because without it `std::fma` is a slow library call that gives the same bits.
-
-**Float normals.** `fill_normal_f32` and `Rng::normalf2()` are the same on Float32 draws, in
-float: `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf` and `sqrtf`. The device fill takes the
-angle through the fast `__sincosf` on `2 pi (v - 0.5)`, which is accurate on `[-pi, pi]`, because
-the precise `sincospif` made the fill compute bound at 1065 GiB/s against 1300 memory bound. The
-result stays within 16 ulps + 1e-6 of the precise step: at most 1.5e-6 absolute over the random
-fills and 7.2e-7 on the fixtures, up to 47 ulps for a value near 0.01, where the absolute error
-dominates. `__logf` is not used, because its absolute error near 1 distorts small radii by
-thousands of ulps. Define `TANDEM_PRECISE_F32_NORMAL` for `sincospif` and 4 ulps. The fill starts at `pos` aligned up to 32 bits and consumes `64 ceil(n / 2)` bits, so
-a block holds two pairs and a start at an odd Float32 draw makes some span two blocks. It does
-not round the f64 normal. Float normals agree across ports and devices to a few ulps, not bit for
-bit, because libm float functions differ. The host version of the f32 step takes its angle in
-double and rounds the results, because a float angle `2 pi b` is off by up to `2 pi b 2^-24`
-where `sincospif` is not. The uniforms are exact, and everything else in this library is bit for
-bit. `tests/cross_fill_normal.h` holds normal fixtures for ports at even and odd starts, from the
-host polynomial code: host builds match them exactly, devices to the tolerances above.
-
-**Exponentials.** `fill_exponential_f64` writes element `i` as `-ln(1 - u)` of Float64 draw `i` of
-the fill that starts at `pos` aligned up to 64 bits, and `fill_exponential_f32` the same in float
-on Float32 draws aligned up to 32 bits, as Appendix A of the specification defines them. A fill
-consumes `n` draws, equals the `Rng::exponential()` (`exponentialf()`) calls, and an empty fill
-returns `pos` unchanged. `tandem::exponential_f64` and `exponential_f32` in `core.hpp` compute the
-logarithm of the f64 and f32 Box-Muller steps on hosts and devices: no libm call, every multiply-add
-an explicit `std::fma`, and no plain product feeding a plain sum. Device contraction therefore
-cannot change the bits, and every host and device returns tandem-c's values, which the tests check
-byte for byte. Building device code with `-use_fast_math` or `-prec-div=false` changes the
-division and breaks that. The maximum error is 1.1e-15 relative in f64 and 2.8e-7 in f32. The
-fills run the direct kernel, because the map makes them compute bound and the tile kernel's
-separate write phase lost 7 to 13 % on the A100. `tests/cross_fill_exponential.h` holds fixtures
-for ports at five start positions, unaligned ones included.
-
-**Bounded integers.** Element `e` uses its own draw `d[e]` of the UInt32 (UInt64) fill and
-Lemire's multiply and reject: `m = d * range`, accepted when the low word of `m` is at least
-`2^32 mod range` (or its 64-bit analogue), result the high word. The threshold `2^32 mod range` is computed once per fill, not per element, which took
-large ranges from 1107 to 1348 GiB/s (`u32`) and from 644 to 1351 (`u64`). The fill consumes exactly `n`
-draws, so it returns `align(pos, w) + w n` at once, without waiting for the device. A sequential
-`Rng::urand(range)` loop would consume extra draws after a rejection, and a parallel fill
-cannot know how many. So a rejected element `e` retries on a fallback stream: draws `0, 1, ...`
-of `split(g)` of `sub(P)` of the fill's generator at position 0 (same key and `K`), with
-`P = 0x424c573332` for 32-bit and `0x424c573634` for 64-bit ranges, until one is accepted. `g` is
-the global draw index `align(pos, w) / w + e` (spec Appendix A), so a fill cut at any element
-boundary, each piece starting where the last ended, equals the whole fill.
-Those two purposes are reserved. A rejection has probability `(2^32 mod range) / 2^32`, so
-ranges that are powers of two never reject, and a fill without rejections equals the sequential
-loop. `range = 0` returns 0 and still consumes the draw. `tests/cross_fill_below.h` holds fixtures for
-ports, bounded fills of 64 elements at several ranges from the key of seed 42, `K = 32`, with the
-rejection counts: `CROSS_BELOW32` and `CROSS_BELOW64` at position 0, where `g = e`, and
-`CROSS_BELOW32_AT` and `CROSS_BELOW64_AT` at the bit positions 1 and 12345 of tandem-c's fixtures,
-where `g` differs from `e`. Regenerate it with `make cross`, which needs only a host
-C++ compiler and `core.hpp`.
-
-## Use
-
-Put `include/` on the include path, for example `nvcc -I<tandem-cuda>/include`.
+```sh
+nvcc -I<tandem-cuda>/include ...
+make test TANDEM_C=../tandem-c      # or: pixi install && pixi run test
+```
 
 ```cpp
 #include "tandem.cuh"
 
-const uint32_t key[4] = {1, 2, 3, 4};
-double *x;
-cudaMalloc(&x, n * sizeof(double));
-uint64_t pos = tandem::fill_f64(key, 0, 32, x, n);   // the spec's Float64 fill from position 0
-uint32_t *die;                                       // 6-sided dice, n draws from the UInt32 stream
-cudaMalloc(&die, n * sizeof(uint32_t));
-pos = tandem::fill_u32_below(key, pos, 32, 6, die, n);
-float *z;                                            // standard normals
-cudaMalloc(&z, n * sizeof(float));
-pos = tandem::fill_normal_f32(key, pos, 32, z, n);
-pos = tandem::fill_exponential_f32(key, pos, 32, z, n); // standard exponentials, in place of z
-
-tandem::generator g = tandem::generator::seed(42);   // the same, with the position kept for you
-g.fill_f64(x, n);
-g.fill_u32_below(6, die, n);
+tandem::generator g = tandem::generator::seed(42);   // keeps the stream position for you
+g.fill_f64(x, n);                                    // the spec's Float64 fill into device memory
+g.fill_u32_below(6, die, n);                         // 6-sided dice, Lemire's method
 
 __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float *out) {
     const uint32_t key[4] = {k0, k1, k2, k3};
     tandem::device_rng rng = tandem::device_rng::from_key(key, 0, 32).split(blockIdx.x * blockDim.x + threadIdx.x);
-    out[threadIdx.x] = rng.next_f32();
+    out[threadIdx.x] = rng.normalf();                // Box-Muller in float
 }
 ```
 
-Parallel use: element `i` of a fill is draw `i`, so ranks, threads or devices that start at the
-position of their first element, or draw from `split(task)`, reproduce a serial run for any
-decomposition, as
-[Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative)
-of the specification shows.
+See [API](docs/api.md) for every fill, `device_rng` and the Thrust adapters, and
+[design](docs/design.md), [tests](docs/tests.md) and [speed](docs/speed.md) for the rest.
 
-## Install
+Portions of the code were generated with the assistance of LLMs.
 
-The library is headers, so copy `tandem.cuh` and `include/tandem/` or put them on the include path. The
-`packaging/` directory holds a Spack recipe (`spack/package.py`) and a conda-forge style recipe
-(`conda/recipe.yaml`) that install both. Neither is submitted to Spack or conda-forge yet, and both
-build from the `main` branch.
-
-```cpp
-#include "tandem_thrust.cuh"
-
-auto it = tandem::make_iterator(tandem::uniform<uint64_t>(key, 32));     // element i of fill_u64
-uint64_t sum = thrust::reduce(it, it + n, (uint64_t)0);                  // no buffer
-```
-
-## Tests
-
-GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80` and checks
-that `tests/vectors.h` matches the spec repository's `vectors.json`. Run the tests on a GPU
-host:
-
-```sh
-make test TANDEM_C=../tandem-c      # or: pixi install && pixi run test
-```
-
-`tests/test_thrust.cu` (`make thrust`) checks that the functors and iterators equal the fills at
-random keys, `K`, positions and lengths, for every type and for bounded ranges that reject, that
-they match the stream dumps, and that `thrust::reduce`, `thrust::copy_n` and
-`cub::DeviceReduce::Sum` read an iterator correctly. Normals match the fills to the tolerances above.
-
-`tests/test_cuda.cu` checks every vector of the specification, compares device fills and
-device scalar draws with reference stream dumps in `tests/data` (the bool, u8 and f16 dumps
-through the public launchers), and compares device fills at random keys,
-chunk lengths, positions, lengths and output alignments with the reference C implementation
-compiled into the test (a checkout at `TANDEM_C`). One mixed sequence of draws on a device
-generator, with bounded draws at small and at rejecting ranges, normals, `at_*`, `fork`,
-`split` and `sub`, is compared with the C library, f32 normals to 4 ulps and the rest bit for
-bit. Bounded fills are compared at ranges that reject often, rarely and never, against a
-reference of the contract above written on the C library's generators, and, where nothing
-rejects, against the sequential C bounded draws. The C library's bounded fills must equal that
-reference too. A bounded fill cut at a random element, at ranges that reject about half the draws,
-equals the whole fill for both widths, the fused low-bound and wider outputs and the generator. Normal fills are compared with the host Box-Muller step on the C library's uniform fills, at
-every start slot, odd and even `n`, bit for bit (f64) and to 16 ulps + 1e-6 (f32, 4 ulps with
-`TANDEM_PRECISE_F32_NORMAL`), and with `tests/cross_fill_normal.h` and tandem-c's
-`tests/cross_normal.h`, f64 bit for bit. Exponential fills equal tandem-c's
-`tandem_fill_exponential_f64` and `_f32` byte for byte at random keys, `K`, start slots and
-lengths up to 2^22, and match `tests/cross_fill_exponential.h` and tandem-c's
-`tests/cross_exponential.h` exactly. The device generator's `exponential()` and `exponentialf()`
-equal the C library's scalar draws. A generator is checked by running mixed fills of every width through it and through the C
-generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
-f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
-returned positions. `tests/host_core.cpp` (`make host`) builds `core.hpp` as C++17 with clang and
-gcc and compares the scalar generator with the C library, because tandem-kokkos, tandem-fortran
-and tandem-torch include it with their own standards. It also hashes 1e6 pairs of f64 and f32
-normals from five start positions and checks the value of tandem-c's `tests/test_normal_bits.c`,
-and does the same for 1e6 f64 and 1e6 f32 exponentials against `tests/test_exponential_bits.c`.
-`./tests/host_core --dump` writes the bytes of tandem-c's `tools/dump_normals`: they are identical
-on the M4 with clang and on x86 with clang 19, gcc 11 and gcc 14, with and without `-mfma`.
-
-**Toolchains.** `pixi.toml` provides conda-forge environments for hosts without a system install.
-The default is CUDA 13.4 (nvcc 13.4.92) with clang 20 as the host compiler and `-std=c++23`, with
-no warnings under `-Wall -Wextra`. `pixi run -e gcc` builds the same with gcc 14 as host compiler
-(`make HOSTCXX=g++ HOSTCC=gcc`). `pixi run -e cuda12` is CUDA 12.8 (nvcc 12.8.93) with clang 19 and
-`-std=c++20`, because nvcc 12.8 stops at C++20. CI builds all three nvcc environments.
-
-Clang can also compile the CUDA sources itself (`clang++ -x cuda --cuda-gpu-arch=sm_80`), as Kokkos
-builds do. `make clangcuda` does that for the tests in the `cuda12` environment, clang 19 with
-CUDA 12.8 and C++20. It compiles without warnings, and on the A100 it passes the same suite with
-the same f32 normal deviations as nvcc, so `__sincosf` behaves alike under both. CI compiles it.
-Clang 20 does not build against the CUDA 13 headers yet, so that pairing is not offered. The GPU host batserv01 has
-NVIDIA driver 570.124, which supports CUDA 12.8 at most, so its test suite and the speeds below run
-in the `cuda12` environment. A CUDA 13 binary needs driver 580 or newer. The GPU suite passed there
-with CUDA 12.8, clang 19 and C++20; the CUDA 13 environments are compiled but not run.
-
-## Speed
-
-NVIDIA A100 40 GB (PCIe), CUDA 12.8 built by clang 19 as the nvcc host compiler with `-std=c++20` (`pixi run -e cuda12 make bench`): 2^28 elements into device memory,
-minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
-the run. Consecutive runs agreed within 1%, except the f64 normal rows within 7%. The Thrust rows are 11 to 21 times slower than the fills,
-because each element reaches its block by random access. They are for values used once, without a
-buffer. The elements are
-2^28 of each type, so the rows for narrow types write fewer bytes.
-
-| | GiB/s written |
-|---|---|
-| `tandem::fill_u32`, tile kernel (default for K >= 8) | 1386 |
-| `tandem::fill_u64`, tile kernel | 1394 |
-| `tandem::fill_f32`, tile kernel | 1381 |
-| `tandem::fill_f64`, tile kernel | 1392 |
-| `tandem::fill_u32`, direct kernel (K < 8) | 1308 |
-| `tandem::fill_u64`, direct kernel | 1315 |
-| `tandem::fill_f32`, direct kernel | 1312 |
-| `tandem::fill_f64`, direct kernel | 1323 |
-| `tandem::fill_u16`, tile kernel | 1370 |
-| `tandem::fill_f16_bits`, tile kernel | 1364 |
-| `tandem::fill_u8`, tile kernel | 1330 |
-| `tandem::fill_bool` (one byte per bit) | 1212 |
-| `tandem::fill_u32_below(1000)` | 1336 |
-| `tandem::fill_u64_below(1000)` | 1348 |
-| `tandem::fill_u32_below(2^32 - 2)`, `fill_u64_below(2^64 - 2)` (rejects about every draw's threshold check) | 1348, 1351 |
-| `tandem::fill_u32_below` with a low bound into `int32_t` | 1348 |
-| `tandem::fill_u32_below` with a low bound into `int64_t` (8-byte elements) | 1365 |
-| `tandem::fill_u64_below` with a low bound into `int64_t` | 1352 |
-| `tandem::fill_normal_f64` | 833 |
-| `tandem::fill_normal_f64`, start at an odd Float64 draw | 679 |
-| `tandem::fill_normal_f32` | 1290 |
-| `tandem::fill_exponential_f64` | 948 |
-| `tandem::fill_exponential_f32` | 1022 |
-| `thrust::transform` of `tandem::uniform<uint32_t>` into a device vector | 65 |
-| `thrust::transform` of `tandem::uniform<double>` into a device vector | 125 |
-| cuRAND Philox4x32-10 `curandGenerate` | 1306 |
-| cuRAND Philox4x32-10 `curandGenerateUniform` | 1311 |
-| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 795 |
-| cuRAND Philox4x32-10 `curandGenerateNormal` | 980 |
-| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 597 |
-
-The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
-as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.
-The direct kernel stores each block straight from registers, so the eight threads of a group
-cover one 128-byte line per step. Both kernels pick a 16-byte vector store at compile time
-when the output's blocks are 16-byte aligned. The bool fill expands each bit to a byte, so it
-stages one step of 32 groups (32 KiB) and writes 1024 contiguous bytes per group. The bounded
-fills run at the fill speed, because a rejection is rare and its retry runs out of line. A
-32-bit range into 8-byte elements gives each thread one 16-byte output slot from two draws, so a
-warp still writes 512 contiguous bytes. Two stores per 16-byte block of draws gave 955 GiB/s. The
-f32 normal fill is memory bound. The f64 one is compute bound on its double-precision step, a
-division, a square root and three polynomials per pair. The exponential fills run into the card's
-250 W power cap on their division and logarithm per element, so they vary by up to 15 % between
-runs.
-
-## AI assistance
-
-This port was written with the help of large language models under human
-direction. The design and the specification are human work, as is much of the
-Julia implementation. The code is tested bit for bit against every vector of
-the specification and against long stream dumps from the Julia implementation,
-and every value must match. The output does not depend on who or what wrote the
-code.
-
-## License
-
-Apache License 2.0. See `LICENSE` and `NOTICE`.
+[Documentation](docs/index.md) · [Apache 2.0 license](LICENSE)
