@@ -538,6 +538,66 @@ static void test_normal() {
     check_normal<float, tandem_fill_normal_f32, tandem::fill_normal_f32>(gen, "f32", 1e-6);
 }
 
+// Successive generator fills continue one stream: the same values and positions as the C
+// generator makes through the same sequence of fills, with every width mixed.
+static void test_generator() {
+    const uint32_t key[4] = {5, 6, 7, 8};
+    tandem::generator g = tandem::generator::from_key(key, 3, 16);
+    tandem_rng c = tandem_from_key(key, 3, 16);
+    const size_t n = 1000;
+
+    dev<uint32_t> d32(n + 2);
+    dev<uint64_t> d64(n + 2);
+    dev<uint8_t> d8(n + 2);
+    dev<double> dz(n + 2);
+    dev<float> df(n + 2);
+    g.fill_u32(d32.p, 37);
+    g.fill_u8(d8.p, 13);
+    g.fill_f64(dz.p, 21);
+    g.fill_u64(d64.p, 5);
+    g.fill_f32(df.p, 9);
+    g.fill_u32_below(6, d32.p + 100, 50);
+    g.fill_normal_f64(dz.p + 100, 77);
+    g.fill_u16(reinterpret_cast<uint16_t *>(d8.p + 64), 11);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<uint32_t> w32(n);
+    std::vector<uint64_t> w64(n);
+    std::vector<uint8_t> w8(n);
+    std::vector<double> wz(n);
+    std::vector<float> wf(n);
+    std::vector<uint16_t> w16(n);
+    tandem_fill_u32(&c, w32.data(), 37);
+    tandem_fill_u8(&c, w8.data(), 13);
+    tandem_fill_f64(&c, wz.data(), 21);
+    tandem_fill_u64(&c, w64.data(), 5);
+    tandem_fill_f32(&c, wf.data(), 9);
+    tandem_fill_u32_below(&c, w32.data() + 100, 50, 6);
+    tandem_fill_normal_f64(&c, wz.data() + 100, 77);
+    tandem_fill_u16(&c, w16.data(), 11);
+
+    auto h32 = d32.host();
+    auto h8 = d8.host();
+    auto h64 = d64.host();
+    auto hz = dz.host();
+    auto hf = df.host();
+    CHECK(std::memcmp(h32.data(), w32.data(), 37 * 4) == 0);
+    CHECK(std::memcmp(h32.data() + 100, w32.data() + 100, 50 * 4) == 0);
+    CHECK(std::memcmp(h8.data(), w8.data(), 13) == 0);
+    CHECK(std::memcmp(h64.data(), w64.data(), 5 * 8) == 0);
+    CHECK(std::memcmp(hf.data(), wf.data(), 9 * 4) == 0);
+    CHECK(std::memcmp(hz.data(), wz.data(), 21 * 8) == 0);
+    CHECK(std::memcmp(h8.data() + 64, w16.data(), 22) == 0);
+    for (size_t i = 0; i < 77; i++)
+        CHECK(std::fabs(hz[100 + i] - wz[100 + i]) <= 1e-12 * (1.0 + std::fabs(wz[100 + i])));
+    CHECK(g.pos == tandem_position(&c));
+    CHECK(g.K == 16);
+
+    // A seeded generator has the key of device_rng::seed.
+    tandem::generator s = tandem::generator::seed(42, 0, 32);
+    CHECK(words_equal(s.key, tandem::device_rng::seed(42, 0, 32).key));
+}
+
 // A signed fill is the unsigned fill of the same width read in two's complement, and it returns
 // the same position.
 template <class S, class U, uint64_t (*sfill)(const uint32_t *, uint64_t, uint32_t, S *, size_t, cudaStream_t),
@@ -580,6 +640,7 @@ int main(int argc, char **argv) {
     test_device_api();
     test_below();
     test_normal();
+    test_generator();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

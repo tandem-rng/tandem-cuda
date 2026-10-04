@@ -28,6 +28,10 @@ It produces the stream the specification defines, bit for bit.
   uniform on `[0, range)`, as `Rng::urand(range)`. Not part of the specification.
 - `tandem::fill_normal_f64/f32(key, pos, K, out, n, stream)`: `n` standard normals by
   Box-Muller, as `Rng::normal()`. Not part of the specification.
+- `tandem::generator`: a host handle with public `key`, `pos` and `K`, built by `from_key` or
+  `seed`. Its `fill_*` methods (every fill above, with the range first for the bounded ones) take
+  the output pointer, `n` and a stream, fill from `pos`, and set `pos` to the position the
+  fill returns, so successive fills continue one stream without the caller tracking positions.
 - `tandem::device_rng`: a per-thread generator for kernels that draw scalars. It holds the
   transport form (public fields `key`, `pos`, `K`) and one cached chunk state, about 20
   registers. `from_key`, `seed`, `skip_to`, `next_bool/u8/u16/u32/u64/f16_bits/f32/f64`. Its
@@ -86,6 +90,10 @@ float *z;                                            // standard normals
 cudaMalloc(&z, n * sizeof(float));
 pos = tandem::fill_normal_f32(key, pos, 32, z, n);
 
+tandem::generator g = tandem::generator::seed(42);   // the same, with the position kept for you
+g.fill_f64(x, n);
+g.fill_u32_below(6, die, n);
+
 __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float *out) {
     const uint32_t key[4] = {k0, k1, k2, k3};
     tandem::device_rng rng = tandem::device_rng::from_key(key, 0, 32).split(blockIdx.x * blockDim.x + threadIdx.x);
@@ -113,7 +121,8 @@ generator, with bounded draws at small and at rejecting ranges, normals, `at_*`,
 bit. Bounded fills are compared at ranges that reject often, rarely and never, against a
 reference of the contract above written on the C library's generators, and, where nothing
 rejects, against the sequential C bounded draws. Normal fills are compared with the C fills,
-at even and odd Float64 starts. The fill comparison covers u8, u16, u32, u64, f16 bits,
+at even and odd Float64 starts. A generator is checked by running mixed fills of every width through it and through the C
+generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `pixi.toml` provides a CUDA
 12.8 toolchain from conda-forge for hosts without a system install.
@@ -122,7 +131,8 @@ returned positions. `pixi.toml` provides a CUDA
 
 NVIDIA A100 40 GB (PCIe), CUDA 12.8, `make bench`: 2^28 elements into device memory,
 minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
-the run. Two consecutive runs agreed within 1%.
+the run. Consecutive runs agreed within 1%, except `fill_normal_f32` within 3%. The elements are
+2^28 of each type, so the rows for narrow types write fewer bytes.
 
 | | GiB/s written |
 |---|---|
@@ -134,15 +144,30 @@ the run. Two consecutive runs agreed within 1%.
 | `tandem::fill_u64`, direct kernel | 1313 |
 | `tandem::fill_f32`, direct kernel | 1309 |
 | `tandem::fill_f64`, direct kernel | 1323 |
+| `tandem::fill_u16`, tile kernel | 1364 |
+| `tandem::fill_f16_bits`, tile kernel | 1368 |
+| `tandem::fill_u8`, tile kernel | 1334 |
+| `tandem::fill_bool` (one byte per bit) | 1227 |
+| `tandem::fill_u32_below(1000)` | 1336 |
+| `tandem::fill_u64_below(1000)` | 1348 |
+| `tandem::fill_normal_f64` | 417 |
+| `tandem::fill_normal_f64`, start at an odd Float64 draw | 347 |
+| `tandem::fill_normal_f32` | 211 |
 | cuRAND Philox4x32-10 `curandGenerate` | 1332 |
 | cuRAND Philox4x32-10 `curandGenerateUniform` | 1307 |
 | cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 781 |
+| cuRAND Philox4x32-10 `curandGenerateNormal` | 977 |
+| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 597 |
 
 The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
 as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.
 The direct kernel stores each block straight from registers, so the eight threads of a group
 cover one 128-byte line per step. Both kernels pick a 16-byte vector store at compile time
-when the output's blocks are 16-byte aligned.
+when the output's blocks are 16-byte aligned. The bool fill expands each bit to a byte, so it
+stages one step of 32 groups (32 KiB) and writes 1024 contiguous bytes per group. The bounded
+fills run at the fill speed, because a rejection is rare and its retry runs out of line. The
+normal fills are limited by double-precision `log`, `cos` and `sqrt`, about 56 billion elements
+per second, whatever the output type, which is why the `float` row shows half the bytes.
 
 ## AI assistance
 

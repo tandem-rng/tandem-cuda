@@ -2,7 +2,7 @@
  * GPUs alike. Header only, C++17, on the portable core include/tandem/core.hpp.
  *
  * Implements https://github.com/tandem-rng/spec and produces the stream it defines, bit for
- * bit. Two entry points:
+ * bit. Entry points:
  *
  *   - tandem::fill_u32/u64/f32/f64: fill device memory from a key and stream position. One
  *     thread per chunk, blocks stored lane-interleaved so a warp writes whole 128-byte lines.
@@ -10,6 +10,8 @@
  *     are not part of the specification. A bounded element consumes one draw and a rejected draw
  *     retries on a fallback stream, a normal is Box-Muller of two Float64 draws of the fill.
  *     See the README for the stream contract.
+ *   - tandem::generator: key, position and K on the host, whose fill_* calls advance the
+ *     position.
  *   - tandem::device_rng: a per-thread generator with one cached chunk state, for kernels
  *     that draw scalars. Its draws equal the C library's tandem_next_* calls.
  *
@@ -483,5 +485,77 @@ inline uint64_t fill_normal_f32(const uint32_t key[4], uint64_t pos, uint32_t K,
                                 size_t n, cudaStream_t stream = 0) {
     return detail::fill_normal(key, pos, K, out, n, stream);
 }
+
+/* A host handle for a stream: the fills above, with the position kept and advanced here. Fills
+ * on one stream run in order, and each call returns the new position, so a generator can
+ * issue fills back to back without a sync. */
+struct generator {
+    uint32_t key[4];
+    uint64_t pos;
+    uint32_t K;
+
+    static generator from_key(const uint32_t k[4], uint64_t p = 0, uint32_t K = DEFAULT_K) {
+        generator g;
+        for (int w = 0; w < 4; w++) g.key[w] = k[w];
+        g.pos = p;
+        g.K = K ? K : DEFAULT_K;
+        return g;
+    }
+
+    static generator seed(uint64_t seed_lo, uint64_t seed_hi = 0, uint32_t K = DEFAULT_K) {
+        uint32_t k[4];
+        seed_key(seed_lo, seed_hi, k);
+        return from_key(k, 0, K);
+    }
+
+    uint64_t fill_u32(uint32_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_u32(key, pos, K, out, n, s);
+    }
+    uint64_t fill_u64(uint64_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_u64(key, pos, K, out, n, s);
+    }
+    uint64_t fill_f32(float *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_f32(key, pos, K, out, n, s);
+    }
+    uint64_t fill_f64(double *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_f64(key, pos, K, out, n, s);
+    }
+    uint64_t fill_bool(bool *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_bool(key, pos, K, out, n, s);
+    }
+    uint64_t fill_u8(uint8_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_u8(key, pos, K, out, n, s);
+    }
+    uint64_t fill_u16(uint16_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_u16(key, pos, K, out, n, s);
+    }
+    uint64_t fill_f16_bits(uint16_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_f16_bits(key, pos, K, out, n, s);
+    }
+    uint64_t fill_i8(int8_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_i8(key, pos, K, out, n, s);
+    }
+    uint64_t fill_i16(int16_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_i16(key, pos, K, out, n, s);
+    }
+    uint64_t fill_i32(int32_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_i32(key, pos, K, out, n, s);
+    }
+    uint64_t fill_i64(int64_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_i64(key, pos, K, out, n, s);
+    }
+    uint64_t fill_u32_below(uint32_t range, uint32_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_u32_below(key, pos, K, range, out, n, s);
+    }
+    uint64_t fill_u64_below(uint64_t range, uint64_t *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_u64_below(key, pos, K, range, out, n, s);
+    }
+    uint64_t fill_normal_f64(double *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_normal_f64(key, pos, K, out, n, s);
+    }
+    uint64_t fill_normal_f32(float *out, size_t n, cudaStream_t s = 0) {
+        return pos = tandem::fill_normal_f32(key, pos, K, out, n, s);
+    }
+};
 
 } // namespace tandem
