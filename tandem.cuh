@@ -23,7 +23,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <type_traits>
+#include <vector>
 
 #include <cuda_runtime.h>
 
@@ -723,8 +725,8 @@ __global__ void __launch_bounds__(THREADS)
     }
 }
 
-/* Short fills, and fills without the stream-ordered allocator, in one kernel that continues each
- * miss where it finds it. */
+/* Short fills, and fills that get no miss list, in one kernel that continues each miss where it
+ * finds it. */
 __global__ void __launch_bounds__(THREADS)
     fill_normal64_fused(uint32_t key0, uint32_t key1, uint32_t key2, uint32_t key3, uint32_t K,
                         uint64_t g0, uint64_t d0, uint64_t n, double *out) {
@@ -738,6 +740,55 @@ __global__ void __launch_bounds__(THREADS)
     });
 }
 
+/* Miss lists kept between fills, per device. A fill takes a list whose last fill is done, or one
+ * last used on its own stream, which it waits for in stream order, else it allocates one. So
+ * lists grow to the number of streams that fill at once, and live to the end of the program: the
+ * CUDA runtime may be gone when static destructors run. */
+struct NormalScratch {
+    void *p;
+    size_t bytes;
+    int device;
+    cudaStream_t stream; /* of the last fill */
+    cudaEvent_t done;    /* recorded after the last fill */
+};
+
+inline std::mutex &normal_scratch_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+/* A list of at least `bytes` on the current device for a fill on `stream`, or null. The caller
+ * holds the mutex, waits for `done` on the stream and records it after the fill. */
+inline NormalScratch *normal_scratch(size_t bytes, cudaStream_t stream) {
+    static auto *all = new std::vector<NormalScratch *>();
+    int dev;
+    if (cudaGetDevice(&dev) != cudaSuccess) return nullptr;
+    NormalScratch *same = nullptr;
+    for (NormalScratch *s : *all) {
+        if (s->device != dev || s->bytes < bytes) continue;
+        if (cudaEventQuery(s->done) == cudaSuccess) return s;
+        if (s->stream == stream) same = s;
+    }
+    (void)cudaGetLastError();
+    if (same) return same;
+    size_t b = 1;
+    while (b < bytes) b <<= 1;
+    auto *s = new NormalScratch{nullptr, b, dev, stream, nullptr};
+    if (cudaMalloc(&s->p, b) != cudaSuccess) {
+        (void)cudaGetLastError();
+        delete s;
+        return nullptr;
+    }
+    if (cudaEventCreateWithFlags(&s->done, cudaEventDisableTiming) != cudaSuccess) {
+        (void)cudaGetLastError();
+        cudaFree(s->p);
+        delete s;
+        return nullptr;
+    }
+    all->push_back(s);
+    return s;
+}
+
 /* Fills below this length take the fused kernel and allocate nothing. */
 constexpr size_t NORMAL_LIST_MIN = (size_t)1 << 16;
 
@@ -749,12 +800,27 @@ inline uint64_t fill_normal_f64_impl(const uint32_t key[4], uint64_t pos, uint32
     uint64_t d0 = p0 >> 6, ba = d0 >> 1, bb = (d0 + n - 1u) >> 1;
     uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K, chunks = 8u * (g1 - g0 + 1u);
     unsigned blocks = (unsigned)((chunks + THREADS - 1) / THREADS);
-    /* Room for twice the expected misses. The stream-ordered allocator reuses the memory of the
-     * last fill. */
+    /* Room for twice the expected misses, in a list kept between fills. The default pool of the
+     * stream-ordered allocator returns its memory at every synchronize, after which a fresh list
+     * cost about 0.7 ms on the host. A fill captured into a graph takes its list from that
+     * allocator, so that each launch of the graph has its own. */
     uint64_t cap = n / 128u;
+    const size_t bytes = 16 + cap * sizeof(NormalMiss);
     void *scratch = nullptr;
-    if (n < NORMAL_LIST_MIN ||
-        cudaMallocAsync(&scratch, 16 + cap * sizeof(NormalMiss), stream) != cudaSuccess) {
+    NormalScratch *kept = nullptr;
+    std::unique_lock<std::mutex> lock(normal_scratch_mutex(), std::defer_lock);
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (n >= NORMAL_LIST_MIN) {
+        (void)cudaStreamIsCapturing(stream, &capture);
+        if (capture == cudaStreamCaptureStatusNone) {
+            lock.lock();
+            kept = normal_scratch(bytes, stream);
+            if (kept && cudaStreamWaitEvent(stream, kept->done, 0) == cudaSuccess) scratch = kept->p;
+        } else if (cudaMallocAsync(&scratch, bytes, stream) != cudaSuccess) {
+            scratch = nullptr;
+        }
+    }
+    if (!scratch) {
         (void)cudaGetLastError();
         fill_normal64_fused<<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2], key[3], K, g0,
                                                             d0, n, out);
@@ -784,7 +850,12 @@ inline uint64_t fill_normal_f64_impl(const uint32_t key[4], uint64_t pos, uint32
     unsigned mblocks = (unsigned)((n / 200u + THREADS - 1) / THREADS);
     fill_normal64_misses<<<mblocks, THREADS, 0, stream>>>(key[0], key[1], key[2], key[3], K, g0,
                                                           chunks, d0, n, list, count, cap, out);
-    cudaFreeAsync(scratch, stream);
+    if (kept) {
+        cudaEventRecord(kept->done, stream);
+        kept->stream = stream;
+    } else {
+        cudaFreeAsync(scratch, stream);
+    }
     return p0 + 64u * (uint64_t)n;
 }
 

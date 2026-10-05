@@ -65,14 +65,6 @@ template <class F> static void row(const char *name, size_t bytes, F body) {
 
 int main(int argc, char **argv) {
     if (argc > 1) filter = argv[1];
-    // Every timing ends in a synchronize, at which the default pool would return the f64 normal
-    // fills' miss list, so each fill would wait for fresh memory (docs/design.md). The rows
-    // measure the fills with the pool keeping its memory, as a caller that synchronizes after
-    // each fill sets it.
-    cudaMemPool_t pool;
-    uint64_t keep = UINT64_MAX;
-    CUDA_CHECK(cudaDeviceGetDefaultMemPool(&pool, 0));
-    CUDA_CHECK(cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &keep));
     void *buf;
     CUDA_CHECK(cudaMalloc(&buf, N * 8));
     const uint32_t key[4] = {1, 2, 3, 4};

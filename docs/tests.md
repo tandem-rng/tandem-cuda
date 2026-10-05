@@ -29,7 +29,9 @@ keys, `K`, start slots, lengths up to 2^21, and outputs on and 8 bytes off 16-by
 covers both kernels and both store paths, about 43000 misses and 570 tail values. They also match
 tandem-c's `tests/cross_normal.h` rows and its hashes of a Python implementation of Appendix A,
 2e5 elements from bits 0 and 2373. A normal fill cut at an odd element, at a missed element and
-just after it equals the whole fill. f32 normal fills are compared with the host Box-Muller step
+just after it equals the whole fill. Fills from every first draw modulo 16, which covers the octet
+stores, equal tandem-c too. Fills on two streams at once, of growing and shrinking lengths, and
+fills captured into a graph and launched twice, equal it as well. f32 normal fills are compared with the host Box-Muller step
 on the C library's uniform fills, at every start slot, odd and even `n`, to 16 ulps + 2.1e-6 (4 ulps
 with `TANDEM_PRECISE_F32_NORMAL`), and with tandem-c's fixture. `tests/cross_fill_normal.h`
 matches exactly in f64 and to the same tolerance in f32. An empty f64 normal fill aligns the

@@ -964,8 +964,9 @@ static void test_cut_normal() {
     }
 }
 
-// Two-kernel normal fills on two streams at once, whose miss lists come from one pool. Each round
-// frees a list that the other stream's next fill can take.
+// Two-kernel normal fills on two streams at once, whose miss lists the library keeps. Each round
+// leaves a list that the other stream's next fill may take, and the sizes grow and shrink, so
+// fills take kept lists, lists in flight on their own stream, and new ones.
 static void test_normal_streams() {
     const size_t n = (size_t)1 << 20;
     const uint32_t keys[2][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}};
@@ -978,15 +979,47 @@ static void test_normal_streams() {
     cudaStream_t st[2];
     for (auto &x : st) CUDA_CHECK(cudaStreamCreateWithFlags(&x, cudaStreamNonBlocking));
     dev<double> out(8 * n); /* fill s of round r at (4 s + r) n */
+    const size_t len[4] = {n, n / 8, n, n / 2}; /* fill s of round r writes len[r] elements */
     for (int r = 0; r < 4; r++)
         for (int s = 0; s < 2; s++)
-            tandem::fill_normal_f64(keys[s], 64 * s, 32, out.p + (4 * s + r) * n, n, st[s]);
+            tandem::fill_normal_f64(keys[s], 64 * s, 32, out.p + (4 * s + r) * n, len[r], st[s]);
     CUDA_CHECK(cudaDeviceSynchronize());
     std::vector<double> got = out.host();
     for (int s = 0; s < 2; s++)
         for (int r = 0; r < 4; r++)
-            CHECK(std::memcmp(got.data() + (4 * s + r) * n, want[s].data(), n * 8) == 0);
+            CHECK(std::memcmp(got.data() + (4 * s + r) * n, want[s].data(), len[r] * 8) == 0);
     for (auto x : st) CUDA_CHECK(cudaStreamDestroy(x));
+}
+
+// A fill captured into a graph takes its list from the stream-ordered allocator, so each launch of
+// the graph has its own.
+static void test_normal_capture() {
+    const size_t n = (size_t)1 << 18;
+    const uint32_t key[4] = {1, 2, 3, 4};
+    tandem_rng c = tandem_from_key(key, 64, 32);
+    std::vector<double> want(n);
+    tandem_fill_normal_f64(&c, want.data(), n);
+    cudaStream_t st;
+    CUDA_CHECK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
+    dev<double> out(2 * n);
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    CUDA_CHECK(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal));
+    tandem::fill_normal_f64(key, 64, 32, out.p, n, st);
+    tandem::fill_normal_f64(key, 64, 32, out.p + n, n, st);
+    CUDA_CHECK(cudaStreamEndCapture(st, &graph));
+    CUDA_CHECK(cudaGraphInstantiate(&exec, graph, 0));
+    for (int launch = 0; launch < 2; launch++) {
+        CUDA_CHECK(cudaMemsetAsync(out.p, 0, 2 * n * 8, st));
+        CUDA_CHECK(cudaGraphLaunch(exec, st));
+        CUDA_CHECK(cudaStreamSynchronize(st));
+        std::vector<double> got = out.host();
+        CHECK(std::memcmp(got.data(), want.data(), n * 8) == 0);
+        CHECK(std::memcmp(got.data() + n, want.data(), n * 8) == 0);
+    }
+    CUDA_CHECK(cudaGraphExecDestroy(exec));
+    CUDA_CHECK(cudaGraphDestroy(graph));
+    CUDA_CHECK(cudaStreamDestroy(st));
 }
 
 // Exponential fills: element i is -ln(1 - u) of uniform draw i, the same polynomial arithmetic as
@@ -1197,6 +1230,7 @@ int main(int argc, char **argv) {
     test_normal_reference();
     test_cut_normal();
     test_normal_streams();
+    test_normal_capture();
     test_cross_normal();
     test_exponential();
     test_cross_exponential();

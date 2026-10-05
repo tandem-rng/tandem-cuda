@@ -57,17 +57,31 @@ thread per chunk, each block's two elements stored as one 16-byte vector. A miss
 in shared memory, and the block appends its queue to a list in global memory with one atomic add.
 The second kernel continues each listed miss, one thread per miss. The table pass makes no call,
 which keeps its registers and its loop free of the slow path's setup. The list has room for
-`n / 128` misses, twice the expected count, from `cudaMallocAsync` on the fill's stream, `n / 8`
-bytes. If it overflows, the second kernel walks the whole fill again and continues every miss.
-The default pool returns its memory at every synchronize, and the next allocation then waits
-about 0.7 ms on the host for fresh memory. With one synchronize per fill, the median fill of
-2^27 elements ran at 470 to 515 GiB/s and of 2^24 at 100 to 140. A raised release threshold
-gave 950 to 970 and 670 to 700. `tools/bench` synchronizes after each fill and raises the
-threshold, so its rows measure the fills. The library keeps no scratch and leaves
-the pools' settings alone. A caller that synchronizes after each fill raises the release
-threshold of the default pool, as tandem-torch does.
-Fills below 2^16 elements, or without the stream-ordered allocator, run one kernel that continues
-each miss in place and allocate nothing.
+`n / 128` misses, twice the expected count, `n / 8` bytes. If it overflows, the second kernel
+walks the whole fill again and continues every miss.
+
+The library keeps the lists between fills, per device. A fill takes a list whose last fill is
+done, or one last used on its own stream, which it waits for in stream order. Otherwise it
+allocates one with `cudaMalloc`, rounded up to a power of two. So the lists grow to the number of
+streams that fill at once, and they live to the end of the program. A list from
+`cudaMallocAsync` in each fill went back to the default pool at every synchronize, after which
+the next allocation waited about 0.7 ms on the host. With a synchronize after each fill, the A100
+then wrote these medians (GiB/s):
+
+| fill | `cudaMallocAsync` | kept list | `cudaMallocAsync`, release threshold raised |
+|---|---|---|---|
+| 2^28, even start | 588, 591 | 1059, 1061 | 1055, 1059 |
+| 2^28, odd start | 578, 583 | 975, 988 | 975, 997 |
+| 2^24 | 123 | 803, 808 | 808 |
+| 2^20 | 9 | 231 | 231 |
+
+Ten fills back to back gave 995 against 1070 at 2^28 and 67 against 273 at 2^20. The kept list
+matched the raised threshold everywhere. An earlier comparison by the fastest of 21 fills found
+caching no faster, because the fastest fill was one that found the pool's memory. A fill captured
+into a graph still takes its list from `cudaMallocAsync`, so that each launch of the graph has
+its own.
+Fills below 2^16 elements, or without a list, run one kernel that continues each miss in place
+and allocate nothing.
 
 When the output and the stream differ by 8 bytes modulo 16, as for a start at an odd draw into an
 aligned buffer, an element pair of one block straddles two 16-byte slots. A warp shuffle then

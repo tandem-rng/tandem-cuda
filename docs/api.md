@@ -61,8 +61,8 @@ __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float
   pass. `fill_u64_below` takes a `uint64_t` or `int64_t` low bound and output.
 - `tandem::fill_normal_f64(key, pos, K, out, n, stream)`: `n` standard normals by the 1024-layer
   ziggurat, one UInt64 draw each, as `Rng::normal()` calls, bit identical to tandem-c. From
-  2^16 elements it takes `n / 8` bytes of scratch from `cudaMallocAsync` on `stream` for its list
-  of misses. `fill_normal_f32`: both Box-Muller halves per two Float32 uniforms, as the flattened
+  2^16 elements it uses a list of misses of `n / 8` bytes, which the library keeps per device
+  between fills, see [design](design.md). `fill_normal_f32`: both Box-Muller halves per two Float32 uniforms, as the flattened
   `Rng::normalf2()` calls. Appendix A of the specification.
 - `tandem::fill_exponential_f64/f32(key, pos, K, out, n, stream)`: `n` standard exponentials
   `-ln(1 - u)`, one uniform each, as `Rng::exponential()` or `exponentialf()` calls, bit
