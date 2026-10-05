@@ -125,6 +125,9 @@ int main() {
                 best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 0, 32, f64, N); }));
     std::printf("%-34s %10.0f\n", "tandem fill_normal_f64, odd start",
                 best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 64, 32, f64, N); }));
+    // Word 6 is draw 3: the shuffled pairs sit 16 bytes off the 128-byte lines.
+    std::printf("%-34s %10.0f\n", "tandem fill_normal_f64, word 6",
+                best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 192, 32, f64, N); }));
     for (int lg : {24, 20}) {
         size_t m = (size_t)1 << lg;
         char row[64];
