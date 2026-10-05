@@ -275,6 +275,8 @@ __device__ __forceinline__ void store_tile_widened(const uint4 *tile, unsigned s
                                                    uint32_t K, uint32_t jb, uint64_t b0,
                                                    uint64_t b1, const Ctx &x,
                                                    typename elem<E>::out_t *out) {
+    /* Each 8-byte half slot holds two draws, so other draw widths would store part of the block. */
+    static_assert(elem<E>::bits == 32, "the widened tile store needs 32-bit draws");
     using out_t = typename elem<E>::out_t;
     constexpr unsigned size = elem<E>::bits / 8, per_tile_group = TILE_STEPS * 8;
     const uint2 *half = reinterpret_cast<const uint2 *>(tile);

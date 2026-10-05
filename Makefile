@@ -26,7 +26,7 @@ FMAFLAGS := $(if $(filter x86_64 amd64,$(shell uname -m)),-mavx2 -mfma,)
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test thrust hostvec bench stats clangcuda host vectors tables cross clean
+.PHONY: build test reject thrust hostvec bench stats clangcuda host vectors tables cross clean
 
 build: tests/test_cuda tests/test_thrust tools/bench
 
@@ -48,6 +48,13 @@ tools/bench: tools/bench.cu $(HEADERS)
 test: tests/test_cuda tests/test_thrust
 	./tests/test_cuda tests/data
 	./tests/test_thrust tests/data
+
+# A negative compile test: the probe must fail on the widened store's static_assert alone, and
+# its CONTROL variant must compile.
+reject: tests/reject_widened.cu $(HEADERS)
+	$(NVCC) $(NVCCFLAGS) -Iinclude -DCONTROL -c -o /dev/null tests/reject_widened.cu
+	$(NVCC) $(NVCCFLAGS) -Iinclude -c -o /dev/null tests/reject_widened.cu 2>&1 | \
+	  grep -q "the widened tile store needs 32-bit draws"
 
 bench: tools/bench
 	./tools/bench

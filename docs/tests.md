@@ -7,6 +7,7 @@ make test TANDEM_C=../tandem-c      # or: pixi install && pixi run test
 make thrust                         # tests/test_thrust.cu
 make host                           # tests/host_core.cpp
 make stats                          # tools/normal_stats.cu, 1e8 f64 normals
+make reject                         # tests/reject_widened.cu must not compile
 ```
 
 ## Suite
@@ -62,8 +63,13 @@ random keys, `K`, positions and lengths, for every type and for bounded ranges t
 they match the stream dumps, and that `thrust::reduce`, `thrust::copy_n` and
 `cub::DeviceReduce::Sum` read an iterator correctly. Normals match the fills to the tolerances in [design](design.md).
 
+`tests/reject_widened.cu` (`make reject`) is a negative compile test. A kind with 16-bit draws into
+32-bit outputs must stop at the `static_assert` of the widened tile store, which pairs two 32-bit
+draws per 8 bytes and would leave half of each block unwritten. Its 32-bit control must compile.
+
 ## CI
 
-GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80` and checks
+GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80`, runs `make reject`,
+and checks
 that `tests/vectors.h` and `include/tandem/normal_tables.hpp` match the spec repository's
 `vectors.json` and `tables/normal_f64_zig1024.json`.

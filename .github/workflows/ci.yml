@@ -35,7 +35,7 @@ jobs:
         with:
           locked: false
           environments: ${{ matrix.env }}
-      - run: pixi run -e ${{ matrix.env }} make build TANDEM_C=tandem-c ${{ matrix.host }}
+      - run: pixi run -e ${{ matrix.env }} make build reject TANDEM_C=tandem-c ${{ matrix.host }}
   clang-cuda:
     name: clang CUDA frontend (clang 19, CUDA 12.8)
     runs-on: ubuntu-latest
