@@ -62,8 +62,8 @@ bytes. If it overflows, the second kernel walks the whole fill again and continu
 The default pool returns its memory at every synchronize, and the next allocation then waits
 about 0.7 ms on the host for fresh memory. With one synchronize per fill, the median fill of
 2^27 elements ran at 470 to 515 GiB/s and of 2^24 at 100 to 140. A raised release threshold
-gave 950 to 970 and 670 to 700. `tools/bench` reports the fastest of 21 such fills, which
-finds the pool's memory, so it does not show the loss. The library keeps no scratch and leaves
+gave 950 to 970 and 670 to 700. `tools/bench` synchronizes after each fill and raises the
+threshold, so its rows measure the fills. The library keeps no scratch and leaves
 the pools' settings alone. A caller that synchronizes after each fill raises the release
 threshold of the default pool, as tandem-torch does.
 Fills below 2^16 elements, or without the stream-ordered allocator, run one kernel that continues
@@ -124,10 +124,9 @@ fills run the direct kernel, because the map makes them compute bound and the ti
 separate write phase lost 7 to 13 % on the A100. `tests/cross_fill_exponential.h` holds fixtures
 for ports at five start positions, unaligned ones included.
 
-The A100 exponential rows rose from 1022 to 1315 GiB/s in f32 and from 948 to 1203 in f64 with
-commit 0ff5f18, which made the f64 normals the ziggurat. That commit left the exponential kernels
-alone: their machine code is the same before and after. Their rows follow the f64 normal rows in
-`tools/bench`, and the exponentials run at the card's 250 W power cap, so the rows before them set
-their best time. Alone after the warm-up, the f32 fill wrote 1137 to 1151 GiB/s at both commits.
-After the Box-Muller f64 rows, which also ran at the cap, it wrote 1036 to 1039. After the
-ziggurat rows it wrote 1307 to 1315.
+Every fill reaches the A100's 250 W power cap when it runs for long. A bench that times the
+fastest of a few calls after a shared warm-up then measures the power the previous rows left.
+The f32 exponential row read 1022 GiB/s after the f64 Box-Muller rows, 1315 after the ziggurat
+rows that replaced them in commit 0ff5f18, and 1140 alone, with the same machine code. So
+`tools/bench` runs each fill for two seconds before it times that fill, and takes the median.
+The f32 exponential row then reads 1019 to 1036 alone and in the table.

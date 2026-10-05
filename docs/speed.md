@@ -4,43 +4,46 @@
 
 ## GPU
 
-NVIDIA A100 40 GB (PCIe), CUDA 12.8 built by clang 19 as the nvcc host compiler with `-std=c++20` (`pixi run -e cuda12 make bench`): 2^28 elements into device memory,
-minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Rows that name a length write fewer elements. Both GPUs idle before
-the run. Consecutive runs agreed within 1%, except the f64 normal rows within 3%. The Thrust rows are 11 to 21 times slower than the fills,
+NVIDIA A100 40 GB (PCIe), CUDA 12.8 built by clang 19 as the nvcc host compiler with `-std=c++20` (`pixi run -e cuda12 make bench`): 2^28 elements into device memory.
+Each row first runs its own fill for two seconds, then gives the median of 21 `cudaEvent`
+timings. In that steady state every fill runs at the card's 250 W power cap, so the rows give
+the capped rate. A row run alone (`tools/bench <part of its name>`) gives the figure it gives
+in the table. The default memory pool keeps its memory, see [design](design.md). Rows that name a length write fewer elements. Both GPUs idle before
+the run. Two consecutive runs agreed within 3 %. The Thrust rows are 11 to 21 times slower than the fills,
 because each element reaches its block by random access. They are for values used once, without a
 buffer. The elements are
 2^28 of each type, so the rows for narrow types write fewer bytes.
 
 | | GiB/s written |
 |---|---|
-| `tandem::fill_u32`, tile kernel (default for K >= 8) | 1386 |
-| `tandem::fill_u64`, tile kernel | 1394 |
-| `tandem::fill_f32`, tile kernel | 1381 |
-| `tandem::fill_f64`, tile kernel | 1392 |
-| `tandem::fill_u32`, direct kernel (K < 8) | 1308 |
-| `tandem::fill_u64`, direct kernel | 1315 |
-| `tandem::fill_f32`, direct kernel | 1312 |
-| `tandem::fill_f64`, direct kernel | 1323 |
-| `tandem::fill_u16`, tile kernel | 1370 |
-| `tandem::fill_f16_bits`, tile kernel | 1364 |
-| `tandem::fill_u8`, tile kernel | 1330 |
-| `tandem::fill_bool` (one byte per bit) | 1212 |
-| `tandem::fill_u32_below(1000)` | 1336 |
-| `tandem::fill_u64_below(1000)` | 1348 |
-| `tandem::fill_u32_below(2^32 - 2)`, `fill_u64_below(2^64 - 2)` (rejects about every draw's threshold check) | 1348, 1351 |
-| `tandem::fill_u32_below` with a low bound into `int32_t` | 1348 |
-| `tandem::fill_u32_below` with a low bound into `int64_t` (8-byte elements) | 1365 |
-| `tandem::fill_u64_below` with a low bound into `int64_t` | 1352 |
-| `tandem::fill_normal_f64` | 1065, 1096 |
-| `tandem::fill_normal_f64`, start at an odd Float64 draw | 1102 |
-| `tandem::fill_normal_f64`, start at word 6 (draw 3) | 712, 714 |
-| `tandem::fill_normal_f64`, 2^24 elements, even and odd start | 788 to 825, 788 to 819 |
-| `tandem::fill_normal_f64`, 2^20 elements, even and odd start | 246, 218 to 224 |
-| `tandem::fill_normal_f32` | 1290 |
-| `tandem::fill_exponential_f64` | 1203, 1206 |
-| `tandem::fill_exponential_f32` | 1315, 1318 |
-| `thrust::transform` of `tandem::uniform<uint32_t>` into a device vector | 65 |
-| `thrust::transform` of `tandem::uniform<double>` into a device vector | 125 |
+| `tandem::fill_u32`, tile kernel (default for K >= 8) | 1379 |
+| `tandem::fill_u64`, tile kernel | 1384 |
+| `tandem::fill_f32`, tile kernel | 1375 |
+| `tandem::fill_f64`, tile kernel | 1387 |
+| `tandem::fill_u32`, direct kernel (K < 8) | 1300 |
+| `tandem::fill_u64`, direct kernel | 1305 |
+| `tandem::fill_f32`, direct kernel | 1304 |
+| `tandem::fill_f64`, direct kernel | 1304 |
+| `tandem::fill_u16`, tile kernel | 1360 |
+| `tandem::fill_f16_bits`, tile kernel | 1327 |
+| `tandem::fill_u8`, tile kernel | 1320 |
+| `tandem::fill_bool` (one byte per bit) | 1233 |
+| `tandem::fill_u32_below(1000)` | 1334 |
+| `tandem::fill_u64_below(1000)` | 1352 |
+| `tandem::fill_u32_below(2^32 - 2)`, `fill_u64_below(2^64 - 2)` (rejects about every draw's threshold check) | 1330, 1293 |
+| `tandem::fill_u32_below` with a low bound into `int32_t` | 1329 |
+| `tandem::fill_u32_below` with a low bound into `int64_t` (8-byte elements) | 1364 |
+| `tandem::fill_u64_below` with a low bound into `int64_t` | 1292 |
+| `tandem::fill_normal_f64` | 1060 |
+| `tandem::fill_normal_f64`, start at an odd Float64 draw | 972 |
+| `tandem::fill_normal_f64`, start at word 6 (draw 3) | 681 |
+| `tandem::fill_normal_f64`, 2^24 elements, even and odd start | 808, 793 |
+| `tandem::fill_normal_f64`, 2^20 elements, even and odd start | 231, 212 |
+| `tandem::fill_normal_f32` | 1167 |
+| `tandem::fill_exponential_f64` | 931 |
+| `tandem::fill_exponential_f32` | 1022 |
+| `thrust::transform` of `tandem::uniform<uint32_t>` into a device vector | 64 |
+| `thrust::transform` of `tandem::uniform<double>` into a device vector | 123 |
 
 The tile kernel stages eight steps of 32 groups in 32 KiB of shared memory and writes them
 as 512 contiguous bytes per warp. It runs at the card's memory bandwidth, about 1.5 TB/s.
@@ -51,14 +54,13 @@ stages one step of 32 groups (32 KiB) and writes 1024 contiguous bytes per group
 fills run at the fill speed, because a rejection is rare and its retry runs out of line. A
 32-bit range into 8-byte elements gives each thread one 16-byte output slot from two draws, so a
 warp still writes 512 contiguous bytes. Two stores per 16-byte block of draws gave 955 GiB/s. The
-f32 normal fill is memory bound. The f64 ziggurat runs a table pass and a second kernel for the
+f32 normal fill writes 85 % of the uniform rate. The f64 ziggurat runs a table pass and a second kernel for the
 0.43 % of misses, see [design](design.md). At 2^24 elements it reaches three quarters of the 2^28 rate: the
 table pass alone runs at 1168 GiB/s, and the misses kernel takes 25 µs of the 150. The Box-Muller fill it replaced ran at 833 and 679
 GiB/s. A start at word 6 puts the shuffled pairs 16 bytes off the 128-byte lines, so each group
 and step touches five 32-byte sectors instead of four. tandem-sycl's octet stores
-recover the odd-start rate there. The exponential fills run into the card's 250 W power cap on
-their division and logarithm per element. Their rows depend on the rows run before them: alone
-after the warm-up the f32 fill writes about 1140 GiB/s, see [design](design.md).
+recover the odd-start rate there. The exponential fills take a division and a logarithm per
+element, which cost them a quarter (f32) and a third (f64) of the uniform rate at the power cap.
 
 ## Other generators
 
@@ -66,8 +68,8 @@ cuRAND on the same card, with the same method:
 
 | | GiB/s written |
 |---|---|
-| cuRAND Philox4x32-10 `curandGenerate` | 1306 |
-| cuRAND Philox4x32-10 `curandGenerateUniform` | 1311 |
-| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 795 |
-| cuRAND Philox4x32-10 `curandGenerateNormal` | 980 |
-| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 597 |
+| cuRAND Philox4x32-10 `curandGenerate` | 1278 |
+| cuRAND Philox4x32-10 `curandGenerateUniform` | 1262 |
+| cuRAND Philox4x32-10 `curandGenerateUniformDouble` | 780 |
+| cuRAND Philox4x32-10 `curandGenerateNormal` | 863 |
+| cuRAND Philox4x32-10 `curandGenerateNormalDouble` | 562 |
