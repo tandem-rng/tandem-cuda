@@ -58,7 +58,11 @@ in shared memory, and the block appends its queue to a list in global memory wit
 The second kernel continues each listed miss, one thread per miss. The table pass makes no call,
 which keeps its registers and its loop free of the slow path's setup. The list has room for
 `n / 128` misses, twice the expected count, from `cudaMallocAsync` on the fill's stream, `n / 8`
-bytes. If it overflows, the second kernel walks the whole fill again and continues every miss.
+bytes. If it overflows, the second kernel walks the whole fill again and continues every miss. The
+allocation costs the A100 1 to 2 µs, also when the default pool returns its memory at every
+synchronize. A list kept between fills, allocated once or from a pool that keeps its memory, was
+no faster at 2^20 and 2^24 elements and 3 to 5 % slower at an odd start of 2^28. So the library
+keeps no scratch and leaves the pools' settings alone.
 Fills below 2^16 elements, or without the stream-ordered allocator, run one kernel that continues
 each miss in place and allocate nothing.
 

@@ -5,7 +5,7 @@
 ## GPU
 
 NVIDIA A100 40 GB (PCIe), CUDA 12.8 built by clang 19 as the nvcc host compiler with `-std=c++20` (`pixi run -e cuda12 make bench`): 2^28 elements into device memory,
-minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Both GPUs idle before
+minimum of 21 `cudaEvent` timings per row after a half-second warm-up. Rows that name a length write fewer elements. Both GPUs idle before
 the run. Consecutive runs agreed within 1%, except the f64 normal rows within 3%. The Thrust rows are 11 to 21 times slower than the fills,
 because each element reaches its block by random access. They are for values used once, without a
 buffer. The elements are
@@ -33,6 +33,8 @@ buffer. The elements are
 | `tandem::fill_u64_below` with a low bound into `int64_t` | 1352 |
 | `tandem::fill_normal_f64` | 1065, 1096 |
 | `tandem::fill_normal_f64`, start at an odd Float64 draw | 1102 |
+| `tandem::fill_normal_f64`, 2^24 elements, even and odd start | 788 to 825, 788 to 819 |
+| `tandem::fill_normal_f64`, 2^20 elements, even and odd start | 246, 218 to 224 |
 | `tandem::fill_normal_f32` | 1290 |
 | `tandem::fill_exponential_f64` | 948 |
 | `tandem::fill_exponential_f32` | 1022 |
@@ -49,7 +51,8 @@ fills run at the fill speed, because a rejection is rare and its retry runs out 
 32-bit range into 8-byte elements gives each thread one 16-byte output slot from two draws, so a
 warp still writes 512 contiguous bytes. Two stores per 16-byte block of draws gave 955 GiB/s. The
 f32 normal fill is memory bound. The f64 ziggurat runs a table pass and a second kernel for the
-0.43 % of misses, see [design](design.md). The Box-Muller fill it replaced ran at 833 and 679
+0.43 % of misses, see [design](design.md). At 2^24 elements it reaches three quarters of the 2^28 rate: the
+table pass alone runs at 1168 GiB/s, and the misses kernel takes 25 µs of the 150. The Box-Muller fill it replaced ran at 833 and 679
 GiB/s. The exponential fills run into the card's
 250 W power cap on their division and logarithm per element, so they vary by up to 15 % between
 runs.
