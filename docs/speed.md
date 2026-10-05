@@ -8,8 +8,8 @@ NVIDIA A100 40 GB (PCIe), CUDA 12.8 built by clang 19 as the nvcc host compiler 
 Each row first runs its own fill for two seconds, then times 21 fills by `cudaEvent`.
 `tools/bench` prints the median and the fastest of the 21, and the table gives the median. In the
 last run the fastest lay at most 5 % above the median on every row. The fastest once hid an
-allocation that slowed most fills, see [design](design.md). In that steady state every fill runs at the card's 250 W power cap, so the rows give
-the capped rate. A row run alone (`tools/bench <part of its name>`) gives the figure it gives
+allocation that slowed most fills, see [design](design.md). After the two seconds every fill runs at
+the card's 250 W power cap, so the rows give the capped rate. A row run alone (`tools/bench <part of its name>`) gives the figure it gives
 in the table. Rows that name a length write fewer elements. Both GPUs idle before
 the run. Two consecutive runs agreed within 3 %. The Thrust rows are 11 to 21 times slower than the fills,
 because each element reaches its block by random access. They are for values used once, without a
