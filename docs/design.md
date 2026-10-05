@@ -79,6 +79,15 @@ then cover whole 32-byte sectors. A row 8 bytes off the sectors halved the speed
 finished by another much later, cost 15 %. Both kernels store each block one step late, so that
 the store does not wait for the step's table reads.
 
+Those stores cover whole sectors only when the stream's rows start on a sector, or 8 bytes
+before one for an odd draw. A start at draw 2 or 3 modulo 4 into a 32-byte aligned output put
+each group's 128 bytes 16 bytes off the sectors, five sectors per group and step, and word 6
+(draw 3) ran at 689 GiB/s against 990 for draw 1. Those starts take tandem-sycl's octet stores
+(`fill_normal64_octets`): units of two elements from the fill's first draw, lane l of a group
+writing unit 8m + l of octet m, 128 aligned bytes, with the values passed between lanes by warp
+shuffles and stored one step late. Word 6 then runs at 931 to 954. The octets lost 3 to 11 % at
+the other starts, so those keep the kernel above.
+
 ### Float32
 
 `fill_normal_f32` is Box-Muller on Float32 draws, in float: pair `j`, the

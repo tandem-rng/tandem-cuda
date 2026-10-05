@@ -884,6 +884,32 @@ static void test_normal64() {
     CHECK(tails > 0);
 }
 
+// The table pass writes octets from the fill's first draw d0: every d0 % 16, which sets the
+// block's lane and the draw within it, then K = 1, whose every octet takes the next group's first
+// row, and outputs on 32-byte addresses and 8 and 16 bytes off. Two-kernel fills, bit for bit.
+static void test_normal64_octets() {
+    const size_t n = 70001;
+    const uint32_t key[4] = {8, 9, 10, 11};
+    for (uint64_t d0 : {0ull, 1ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, 11ull, 12ull,
+                        13ull, 14ull, 15ull, (1ull << 30) + 3})
+        for (uint32_t K : {1u, 32u}) {
+            tandem_rng c = tandem_from_key(key, 64 * d0, K);
+            std::vector<double> want(n), got(n);
+            tandem_fill_normal_f64(&c, want.data(), n);
+            for (unsigned shift : {0u, 1u, 2u}) {
+                dev<double> d(n + 2);
+                CHECK(tandem::fill_normal_f64(key, 64 * d0, K, d.p + shift, n) == tandem_position(&c));
+                CUDA_CHECK(cudaDeviceSynchronize());
+                CUDA_CHECK(cudaMemcpy(got.data(), d.p + shift, n * 8, cudaMemcpyDeviceToHost));
+                if (std::memcmp(got.data(), want.data(), n * 8) != 0) {
+                    std::printf("FAIL f64 normal octets (d0=%llu K=%u shift=%u)\n",
+                                (unsigned long long)d0, K, shift);
+                    failures++;
+                }
+            }
+        }
+}
+
 static uint64_t fnv(const void *p, size_t n) {
     const unsigned char *b = static_cast<const unsigned char *>(p);
     uint64_t h = 0xcbf29ce484222325ull;
@@ -1167,6 +1193,7 @@ int main(int argc, char **argv) {
     test_cut_below();
     test_normal();
     test_normal64();
+    test_normal64_octets();
     test_normal_reference();
     test_cut_normal();
     test_normal_streams();
