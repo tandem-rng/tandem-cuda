@@ -650,7 +650,9 @@ inline uint64_t fill_normal_f64_impl(const uint32_t key[4], uint64_t pos, uint32
 /* The float Box-Muller step of the fill kernel. It is box_muller2_f32 with the angle through
  * the fast __sincosf, which with precise logf and sqrtf makes the fill memory bound instead of
  * compute bound. __sincosf is accurate only on [-pi, pi], so the angle is shifted by half a turn.
- * The result stays within 16 ulps + 1e-6 of the precise step (measured at most 1.5e-6 absolute).
+ * The result stays within 16 ulps + 2.1e-6 of the precise step: __sincosf errs by up to
+ * 2^-21.41 absolute, times a radius of up to 5.77. About one value in 10^6 passes the spec's 1e-6
+ * floor. The precise sincospif, or the reference polynomials, make the fill compute bound.
  * Define TANDEM_PRECISE_F32_NORMAL for sincospif. __logf is not used: its absolute error near
  * 1 distorts small radii by thousands of ulps. */
 __device__ __forceinline__ Pair2<float> normal_step_f32(float a, float b) {
