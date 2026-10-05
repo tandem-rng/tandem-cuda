@@ -125,6 +125,14 @@ int main() {
                 best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 0, 32, f64, N); }));
     std::printf("%-34s %10.0f\n", "tandem fill_normal_f64, odd start",
                 best_gibs(N * 8, [&] { tandem::fill_normal_f64(key, 64, 32, f64, N); }));
+    for (int lg : {24, 20}) {
+        size_t m = (size_t)1 << lg;
+        char row[64];
+        std::snprintf(row, sizeof row, "tandem fill_normal_f64, 2^%d", lg);
+        std::printf("%-34s %10.0f\n", row, best_gibs(m * 8, [&] { tandem::fill_normal_f64(key, 0, 32, f64, m); }));
+        std::snprintf(row, sizeof row, "tandem fill_normal_f64, 2^%d, odd", lg);
+        std::printf("%-34s %10.0f\n", row, best_gibs(m * 8, [&] { tandem::fill_normal_f64(key, 64, 32, f64, m); }));
+    }
     std::printf("%-34s %10.0f\n", "tandem fill_exponential_f32",
                 best_gibs(N * 4, [&] { tandem::fill_exponential_f32(key, 0, 32, f32, N); }));
     std::printf("%-34s %10.0f\n", "tandem fill_exponential_f64",

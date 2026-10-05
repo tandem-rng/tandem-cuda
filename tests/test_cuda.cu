@@ -934,6 +934,31 @@ static void test_cut_normal() {
     }
 }
 
+// Two-kernel normal fills on two streams at once, whose miss lists come from one pool. Each round
+// frees a list that the other stream's next fill can take.
+static void test_normal_streams() {
+    const size_t n = (size_t)1 << 20;
+    const uint32_t keys[2][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}};
+    std::vector<double> want[2];
+    for (int s = 0; s < 2; s++) {
+        tandem_rng c = tandem_from_key(keys[s], 64 * s, 32);
+        want[s].resize(n);
+        tandem_fill_normal_f64(&c, want[s].data(), n);
+    }
+    cudaStream_t st[2];
+    for (auto &x : st) CUDA_CHECK(cudaStreamCreateWithFlags(&x, cudaStreamNonBlocking));
+    dev<double> out(8 * n); /* fill s of round r at (4 s + r) n */
+    for (int r = 0; r < 4; r++)
+        for (int s = 0; s < 2; s++)
+            tandem::fill_normal_f64(keys[s], 64 * s, 32, out.p + (4 * s + r) * n, n, st[s]);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<double> got = out.host();
+    for (int s = 0; s < 2; s++)
+        for (int r = 0; r < 4; r++)
+            CHECK(std::memcmp(got.data() + (4 * s + r) * n, want[s].data(), n * 8) == 0);
+    for (auto x : st) CUDA_CHECK(cudaStreamDestroy(x));
+}
+
 // Exponential fills: element i is -ln(1 - u) of uniform draw i, the same polynomial arithmetic as
 // tandem-c's fill, so the device output equals tandem_fill_exponential_* byte for byte at every
 // start slot, K and length, the end positions included.
@@ -1140,6 +1165,7 @@ int main(int argc, char **argv) {
     test_normal64();
     test_normal_reference();
     test_cut_normal();
+    test_normal_streams();
     test_cross_normal();
     test_exponential();
     test_cross_exponential();
