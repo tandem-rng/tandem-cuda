@@ -33,11 +33,12 @@ buffer. The elements are
 | `tandem::fill_u64_below` with a low bound into `int64_t` | 1352 |
 | `tandem::fill_normal_f64` | 1065, 1096 |
 | `tandem::fill_normal_f64`, start at an odd Float64 draw | 1102 |
+| `tandem::fill_normal_f64`, start at word 6 (draw 3) | 712, 714 |
 | `tandem::fill_normal_f64`, 2^24 elements, even and odd start | 788 to 825, 788 to 819 |
 | `tandem::fill_normal_f64`, 2^20 elements, even and odd start | 246, 218 to 224 |
 | `tandem::fill_normal_f32` | 1290 |
-| `tandem::fill_exponential_f64` | 948 |
-| `tandem::fill_exponential_f32` | 1022 |
+| `tandem::fill_exponential_f64` | 1203, 1206 |
+| `tandem::fill_exponential_f32` | 1315, 1318 |
 | `thrust::transform` of `tandem::uniform<uint32_t>` into a device vector | 65 |
 | `thrust::transform` of `tandem::uniform<double>` into a device vector | 125 |
 
@@ -53,9 +54,11 @@ warp still writes 512 contiguous bytes. Two stores per 16-byte block of draws ga
 f32 normal fill is memory bound. The f64 ziggurat runs a table pass and a second kernel for the
 0.43 % of misses, see [design](design.md). At 2^24 elements it reaches three quarters of the 2^28 rate: the
 table pass alone runs at 1168 GiB/s, and the misses kernel takes 25 µs of the 150. The Box-Muller fill it replaced ran at 833 and 679
-GiB/s. The exponential fills run into the card's
-250 W power cap on their division and logarithm per element, so they vary by up to 15 % between
-runs.
+GiB/s. A start at word 6 puts the shuffled pairs 16 bytes off the 128-byte lines, so each group
+and step touches five 32-byte sectors instead of four. tandem-sycl's octet stores
+recover the odd-start rate there. The exponential fills run into the card's 250 W power cap on
+their division and logarithm per element. Their rows depend on the rows run before them: alone
+after the warm-up the f32 fill writes about 1140 GiB/s, see [design](design.md).
 
 ## Other generators
 

@@ -58,11 +58,14 @@ in shared memory, and the block appends its queue to a list in global memory wit
 The second kernel continues each listed miss, one thread per miss. The table pass makes no call,
 which keeps its registers and its loop free of the slow path's setup. The list has room for
 `n / 128` misses, twice the expected count, from `cudaMallocAsync` on the fill's stream, `n / 8`
-bytes. If it overflows, the second kernel walks the whole fill again and continues every miss. The
-allocation costs the A100 1 to 2 µs, also when the default pool returns its memory at every
-synchronize. A list kept between fills, allocated once or from a pool that keeps its memory, was
-no faster at 2^20 and 2^24 elements and 3 to 5 % slower at an odd start of 2^28. So the library
-keeps no scratch and leaves the pools' settings alone.
+bytes. If it overflows, the second kernel walks the whole fill again and continues every miss.
+The default pool returns its memory at every synchronize, and the next allocation then waits
+about 0.7 ms on the host for fresh memory. With one synchronize per fill, the median fill of
+2^27 elements ran at 470 to 515 GiB/s and of 2^24 at 100 to 140. A raised release threshold
+gave 950 to 970 and 670 to 700. `tools/bench` reports the fastest of 21 such fills, which
+finds the pool's memory, so it does not show the loss. The library keeps no scratch and leaves
+the pools' settings alone. A caller that synchronizes after each fill raises the release
+threshold of the default pool, as tandem-torch does.
 Fills below 2^16 elements, or without the stream-ordered allocator, run one kernel that continues
 each miss in place and allocate nothing.
 
@@ -85,10 +88,15 @@ flattened `Rng::normalf2()` calls, with `u = 1 - d[2j]`, `v = d[2j + 1]`, precis
 empty fill returns `pos` unchanged. The device fill takes the
 angle through the fast `__sincosf` on `2 pi (v - 0.5)`, which is accurate on `[-pi, pi]`, because
 the precise `sincospif` made the fill compute bound at 1065 GiB/s against 1300 memory bound. The
-result differs from the precise step by at most 1.55e-6 absolute over the random fills and 7.2e-7
-on the fixtures, up to 47 ulps for a value near 0.01, where the absolute error dominates. That
-exceeds the 16 ulps + 1e-6 of the specification's tolerance for a few values: one element of 75211
-reached 1.37e-6 at a value near 0.03. `__logf` is not used, because its absolute error near 1 distorts small radii by
+result differs from the precise step by at most 1.73e-6 absolute over the random fills and 7.2e-7
+on the fixtures, up to 47 ulps for a value near 0.01, where the absolute error dominates. The
+bound is 16 ulps + 2.1e-6: `__sincosf` errs by up to 2^-21.41 absolute on `[-pi, pi]`, times a
+radius of up to 5.77. That exceeds the 1e-6 floor of the specification's tolerance for about one
+value in 10^6. The tests' seed holds one: `a = 0x1.fff256p-1`, `b = 0x1.040388p-2`, radius 5,
+give -0.10545215 against the host's -0.105453432, 1.28e-6 apart. So the tests take 16 ulps +
+2.1e-6 for the device fill. On the A100, `sincospif` made the fill compute bound at 1065 GiB/s. The
+C reference's float polynomials, bit exact with tandem-c, gave 935, also with precise `logf`
+for the radius, while `__sincosf` gave 1270 in the same runs. `__logf` is not used, because its absolute error near 1 distorts small radii by
 thousands of ulps. Define `TANDEM_PRECISE_F32_NORMAL` for `sincospif` and 4 ulps. The fill starts at `pos` aligned up to 32 bits and consumes `64 ceil(n / 2)` bits, so
 a block holds two pairs and a start at an odd Float32 draw makes some span two blocks. Float normals agree across ports and devices to a few ulps, not bit for
 bit, because libm float functions differ. The host version of the f32 step takes its angle in
@@ -115,3 +123,11 @@ division and breaks that. The maximum error is 1.1e-15 relative in f64 and 2.8e-
 fills run the direct kernel, because the map makes them compute bound and the tile kernel's
 separate write phase lost 7 to 13 % on the A100. `tests/cross_fill_exponential.h` holds fixtures
 for ports at five start positions, unaligned ones included.
+
+The A100 exponential rows rose from 1022 to 1315 GiB/s in f32 and from 948 to 1203 in f64 with
+commit 0ff5f18, which made the f64 normals the ziggurat. That commit left the exponential kernels
+alone: their machine code is the same before and after. Their rows follow the f64 normal rows in
+`tools/bench`, and the exponentials run at the card's 250 W power cap, so the rows before them set
+their best time. Alone after the warm-up, the f32 fill wrote 1137 to 1151 GiB/s at both commits.
+After the Box-Muller f64 rows, which also ran at the cap, it wrote 1036 to 1039. After the
+ziggurat rows it wrote 1307 to 1315.
