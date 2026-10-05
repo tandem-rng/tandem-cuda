@@ -1,7 +1,8 @@
 // Throughput of the device fills into device memory, next to cuRAND Philox4x32-10.
 // Each row first runs its own fill for WARM_MS, so the card reaches that fill's steady clocks and
-// power whatever ran before, then reports the median of 21 cudaEvent timings. A row run alone
-// gives the figure it gives in the table. The fills that hit the 250 W power cap are measured at
+// power whatever ran before, then reports the median and the fastest of 21 cudaEvent timings.
+// docs/speed.md gives the median: the fastest once hid a slow allocation in most calls. A row run
+// alone gives the figures it gives in the table. The fills that hit the 250 W power cap are measured at
 // the capped steady state.
 // Build and run on a GPU host: make bench. `tools/bench exponential` runs only the rows whose
 // name contains "exponential".
@@ -31,7 +32,11 @@ static const size_t N = (size_t)1 << 28;
 static const float WARM_MS = 2000;
 static const char *filter = nullptr;
 
-template <class F> static double best_gibs(size_t bytes, F body) {
+struct Rate {
+    double median, best; /* GiB/s */
+};
+
+template <class F> static Rate rate(size_t bytes, F body) {
     cudaEvent_t t0, t1;
     CUDA_CHECK(cudaEventCreate(&t0));
     CUDA_CHECK(cudaEventCreate(&t1));
@@ -53,13 +58,15 @@ template <class F> static double best_gibs(size_t bytes, F body) {
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaEventDestroy(t0));
     CUDA_CHECK(cudaEventDestroy(t1));
-    std::nth_element(ms.begin(), ms.begin() + 10, ms.end());
-    return (double)bytes / (ms[10] * 1e-3) / (1024.0 * 1024.0 * 1024.0);
+    std::sort(ms.begin(), ms.end());
+    auto gibs = [&](float t) { return (double)bytes / (t * 1e-3) / (1024.0 * 1024.0 * 1024.0); };
+    return Rate{gibs(ms[10]), gibs(ms[0])};
 }
 
 template <class F> static void row(const char *name, size_t bytes, F body) {
     if (filter && !std::strstr(name, filter)) return;
-    std::printf("%-34s %10.0f\n", name, best_gibs(bytes, body));
+    Rate r = rate(bytes, body);
+    std::printf("%-34s %10.0f %10.0f\n", name, r.median, r.best);
     std::fflush(stdout);
 }
 
@@ -73,7 +80,7 @@ int main(int argc, char **argv) {
     auto f32 = static_cast<float *>(buf);
     auto f64 = static_cast<double *>(buf);
 
-    std::printf("%-34s %10s\n", "", "GiB/s");
+    std::printf("%-34s %10s %10s\n", "GiB/s", "median", "fastest");
     row("tandem fill_u32, direct kernel", N * 4,
         [&] { tandem::detail::fill<uint32_t>(key, 0, 32u, u32, N, 0, false); });
     row("tandem fill_u64, direct kernel", N * 8,
