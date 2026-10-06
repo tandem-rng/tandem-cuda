@@ -1138,6 +1138,100 @@ static void test_cross_exponential() {
     }
 }
 
+// ---- Weighted choice ----------------------------------------------------------------------------
+
+// A table built on the host, its arrays copied to the device, and the C library's table of the same
+// weights.
+struct DeviceChoice {
+    std::vector<uint64_t> ccut;
+    std::vector<uint32_t> calias;
+    tandem_choice_table c;
+    dev<uint64_t> cut;
+    dev<uint32_t> alias;
+    tandem::ChoiceTable t;
+
+    explicit DeviceChoice(const std::vector<double> &w)
+        : ccut(w.size()), calias(w.size()), cut(w.size()), alias(w.size()) {
+        std::vector<uint64_t> hc(w.size());
+        std::vector<uint32_t> ha(w.size());
+        CHECK(tandem::choice_build(t, w.data(), w.size(), hc.data(), ha.data()));
+        CHECK(tandem_choice_build(&c, w.data(), w.size(), ccut.data(), calias.data()));
+        CUDA_CHECK(cudaMemcpy(cut.p, hc.data(), w.size() * 8, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(alias.p, ha.data(), w.size() * 4, cudaMemcpyHostToDevice));
+        t.cut = cut.p;
+        t.alias = alias.p;
+    }
+};
+
+__global__ void choice_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, uint64_t pos,
+                              uint32_t K, tandem::ChoiceTable t, uint32_t *out, size_t n,
+                              uint64_t *end) {
+    const uint32_t key[4] = {k0, k1, k2, k3};
+    tandem::device_rng r = tandem::device_rng::from_key(key, pos, K);
+    for (size_t i = 0; i < n; i++) out[i] = r.choice(t);
+    *end = r.pos;
+}
+
+// Element i of a choice fill maps UInt64 draw i through the table, so the device fill equals
+// tandem_fill_choice at every K and start, through the tile and the direct kernel, with outputs on
+// and off 16-byte alignment, the end positions too. The device_rng draws equal tandem_choice.
+static void test_choice() {
+    std::mt19937_64 gen(4242);
+    for (int trial = 0; trial < 40; trial++) {
+        uint32_t key[4];
+        for (auto &w : key) w = (uint32_t)gen();
+        uint32_t K = 1u << (gen() % 8);
+        uint64_t pos = gen() % (1u << 20);
+        size_t n = (size_t)(gen() % (trial < 30 ? 5000 : 300000)), shift = gen() % 4;
+        std::vector<double> w(1 + gen() % (trial % 2 ? 3000 : 12));
+        for (auto &x : w) x = gen() % 4 ? (double)(gen() >> 11) * 0x1p-40 : 0.0;
+        w[gen() % w.size()] = 0.5;
+        DeviceChoice tb(w);
+        tandem_rng c = tandem_from_key(key, pos, K);
+        std::vector<uint32_t> want(n);
+        tandem_fill_choice(&c, want.data(), n, &tb.c);
+        for (bool tile : {true, false}) {
+            dev<uint32_t> d(n + 4);
+            uint64_t end = tandem::detail::fill<tandem::detail::choice_idx>(
+                key, pos, K, d.p + shift, n, 0, tile, tandem::detail::Bound{0, 0, 0, tb.t});
+            CUDA_CHECK(cudaDeviceSynchronize());
+            std::vector<uint32_t> got(n);
+            CUDA_CHECK(cudaMemcpy(got.data(), d.p + shift, n * 4, cudaMemcpyDeviceToHost));
+            CHECK(end == tandem_position(&c));
+            if (got != want) {
+                size_t i = 0;
+                while (got[i] == want[i]) i++;
+                std::printf("FAIL choice fill vs C (%s, K=%u pos=%llu n=%zu m=%zu) element %zu\n",
+                            tile ? "tile" : "direct", K, (unsigned long long)pos, n, w.size(), i);
+                failures++;
+            }
+        }
+        if (n > 512) continue;
+        dev<uint32_t> d(n + 1);
+        dev<uint64_t> end(1);
+        choice_kernel<<<1, 1>>>(key[0], key[1], key[2], key[3], pos, K, tb.t, d.p, n, end.p);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<uint32_t> got = d.host();
+        got.resize(n);
+        tandem_rng s = tandem_from_key(key, pos, K);
+        std::vector<uint32_t> seq(n);
+        for (auto &v : seq) v = tandem_choice(&s, &tb.c);
+        CHECK(got == seq && end.host()[0] == tandem_position(&s));
+    }
+    // The generator handle cuts a fill anywhere into pieces that equal the whole fill.
+    DeviceChoice tb({3, 0, 1, 7.5, 0.125});
+    const size_t n = 100000;
+    for (size_t k : {(size_t)1, (size_t)7, (size_t)20, (size_t)21, (size_t)65537, n - 1}) {
+        tandem::generator w = tandem::generator::from_key(KEY1234, 4321, 32), v = w;
+        dev<uint32_t> a(n), b(n);
+        w.fill_choice(tb.t, a.p, n);
+        v.fill_choice(tb.t, b.p, k);
+        v.fill_choice(tb.t, b.p + k, n - k);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CHECK(a.host() == b.host() && w.pos == v.pos);
+    }
+}
+
 // Successive generator fills continue one stream: the same values and positions as the C
 // generator makes through the same sequence of fills, with every width mixed.
 static void test_generator() {
@@ -1209,15 +1303,17 @@ static void test_generator() {
 }
 
 // An empty f32 normal, exponential or bounded fill leaves an unaligned position alone. An empty f64
-// normal fill aligns it to 64 bits, as an empty uniform fill does (spec section 5).
+// normal or choice fill aligns it to 64 bits, as an empty uniform fill does (spec section 5).
 static void test_empty_fills() {
     const uint32_t key[4] = {1, 2, 3, 4};
     dev<float> f(4);
     dev<double> d(4);
     dev<uint32_t> u(4);
     dev<uint64_t> w(4);
+    DeviceChoice tb({1, 2});
     for (uint64_t pos : {0ull, 1ull, 33ull, 64ull, 65ull, 1001ull}) {
         CHECK(tandem::fill_normal_f64(key, pos, 32, d.p, 0) == tandem::align_pos(pos, 64));
+        CHECK(tandem::fill_choice(key, pos, 32, tb.t, u.p, 0) == tandem::align_pos(pos, 64));
         CHECK(tandem::fill_normal_f32(key, pos, 32, f.p, 0) == pos);
         CHECK(tandem::fill_exponential_f64(key, pos, 32, d.p, 0) == pos);
         CHECK(tandem::fill_exponential_f32(key, pos, 32, f.p, 0) == pos);
@@ -1287,6 +1383,7 @@ int main(int argc, char **argv) {
     test_cross_normal();
     test_exponential();
     test_cross_exponential();
+    test_choice();
     test_generator();
     test_empty_fills();
     if (failures) {

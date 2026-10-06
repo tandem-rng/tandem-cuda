@@ -1,10 +1,11 @@
 // core.hpp on a host compiler in C++17, the standard its other consumers (Kokkos, Fortran, torch)
-// build with: the scalar generator, the normals and the exponentials agree with the C library and
-// the fixtures bit for bit, and the f32 Box-Muller block with libm to a tolerance.
+// build with: the scalar generator, the normals, the exponentials and weighted choice agree with
+// the C library and the fixtures bit for bit, and the f32 Box-Muller block with libm to a tolerance.
 // Run: make host
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <random>
 #include <type_traits>
 #include <vector>
 #include "tandem/core.hpp"
@@ -14,9 +15,59 @@ extern "C" {
 #include "cross_fill_below.h"
 #include "cross_fill_exponential.h"
 #include "cross_fill_normal.h"
-#include "tests/cross_normal.h" // tandem-c's, through -I$(TANDEM_C)
+#include "tests/cross_choice.h" // tandem-c's, through -I$(TANDEM_C)
+#include "tests/cross_normal.h"
 
 static int bad;
+
+// The table of choice_build is tandem_choice_build's, entry for entry, and its scalar draws are
+// tandem_choice's. Weights span zeros, subnormals and DBL_MAX, so both scaling passes and the
+// rounding up of tiny weights run. Invalid weights build no table.
+static void test_choice() {
+    for (const auto &f : CROSS_CHOICE) {
+        std::vector<uint64_t> cut(f.m);
+        std::vector<uint32_t> alias(f.m);
+        tandem::ChoiceTable t;
+        bad += !tandem::choice_build(t, f.weights, f.m, cut.data(), alias.data());
+        bad += t.capacity != f.capacity;
+        tandem::Rng q(42, 0, 32);
+        q.set_position(f.start);
+        for (uint32_t w : f.want) bad += q.choice(t) != w;
+        bad += q.position() != f.end_pos;
+    }
+    std::mt19937_64 gen(31337);
+    for (int trial = 0; trial < 400; trial++) {
+        size_t m = 1 + gen() % (trial < 300 ? 40 : 5000);
+        std::vector<double> w(m);
+        for (auto &x : w) {
+            switch (gen() % 6) {
+            case 0: x = 0; break;
+            case 1: x = std::ldexp((double)(gen() >> 11), -1074 - 53 + (int)(gen() % 60)); break;
+            case 2: x = std::ldexp((double)(gen() >> 11), 1023 - 53 + (int)(gen() % 2)); break;
+            default: x = (double)(gen() >> 11) * 0x1p-53 * std::ldexp(1.0, (int)(gen() % 40) - 20);
+            }
+        }
+        w[gen() % m] = 1;
+        std::vector<uint64_t> cut(m), ccut(m);
+        std::vector<uint32_t> alias(m), calias(m);
+        tandem::ChoiceTable t;
+        tandem_choice_table ct;
+        bool ok = tandem::choice_build(t, w.data(), m, cut.data(), alias.data());
+        bad += ok != tandem_choice_build(&ct, w.data(), m, ccut.data(), calias.data());
+        if (!ok) continue;
+        bad += t.capacity != ct.capacity || cut != ccut || alias != calias;
+        tandem::Rng q = tandem::Rng::from_key(tandem::Key{{1, 2, 3, (uint32_t)trial}}, gen() % 5000, 32);
+        tandem_rng c = tandem_from_key(q.key().w, q.position(), 32);
+        for (int i = 0; i < 100; i++) bad += q.choice(t) != tandem_choice(&c, &ct);
+    }
+    const double nan = std::nan(""), inf = HUGE_VAL;
+    const double invalid[][2] = {{1, -1}, {1, nan}, {1, inf}, {0, 0}, {-0.0, 0}};
+    uint64_t cut[2];
+    uint32_t alias[2];
+    tandem::ChoiceTable t;
+    for (const auto &w : invalid) bad += tandem::choice_build(t, w, 2, cut, alias);
+    bad += tandem::choice_build(t, invalid[0], 0, cut, alias);
+}
 
 static uint64_t fnv(uint64_t h, const void *p, size_t n) {
     const unsigned char *b = static_cast<const unsigned char *>(p);
@@ -208,6 +259,8 @@ int main(int argc, char **argv) {
     for (const auto &f : CROSS_BELOW64) bad += !below64_ok(0, f.range, f.out);
     for (const auto &f : CROSS_BELOW32_AT) bad += !below32_ok(f.start, f.range, f.out);
     for (const auto &f : CROSS_BELOW64_AT) bad += !below64_ok(f.start, f.range, f.out);
+
+    test_choice();
 
     uint64_t he = exponential_bits();
     bad += he != EXPONENTIAL_BITS_HASH;

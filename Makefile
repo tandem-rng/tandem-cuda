@@ -80,7 +80,7 @@ clangcuda: tests/test_clangcuda
 
 # core.hpp must stay valid C++17 for its other consumers, so this build pins the standard. The
 # test checks that the normals hash to tandem-c's tests/test_normal_bits.c value.
-tests/host_core: tests/host_core.cpp $(HEADERS) tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h tandem_c.o
+tests/host_core: tests/host_core.cpp $(HEADERS) tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h $(TANDEM_C)/tests/cross_choice.h tandem_c.o
 	$(CXX_HOST) -std=c++17 -O2 $(FMAFLAGS) -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ tests/host_core.cpp tandem_c.o
 
 host: tests/host_core
