@@ -301,6 +301,11 @@ static void test_position_bounds() {
     CHECK(q.urand64() == r.at_urand64(1) && q.position() == top + 64);
     q = before;
     CHECK(!q.set_position(top) && !q.set_position(~(uint64_t)0) && q == before);
+    // A fill end past 2^63 moves the generator by advance_to, and draws continue from there.
+    tandem::Rng f = tandem::Rng::from_key(q.key(), 0, 32);
+    CHECK(f.set_position(top - 1));
+    f.advance_to(top + 64);
+    CHECK(f.position() == top + 64 && f.urand64() == r.at_urand64(2) && f.position() == top + 128);
     CHECK(tandem::Rng::from_key(q.key(), top - 1, 32).position() == top - 1);
     CHECK(tandem::Rng::from_key(q.key(), top, 32).position() == 0);
     CHECK(tandem::Rng::from_key(q.key(), ~(uint64_t)0, 32).position() == 0);

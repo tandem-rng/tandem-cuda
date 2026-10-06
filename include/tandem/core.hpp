@@ -802,6 +802,9 @@ class Rng : public Draws<Rng> {
         s_.pos = p;
         return true;
     }
+    /* Move to the end p of draws or a fill made from this generator, unchecked: an end may lie
+     * at or past 2^63, which set_position rejects as a start. */
+    TANDEM_FN void advance_to(uint64_t p) { s_.pos = p; }
 
     TANDEM_FN friend bool operator==(const Rng &a, const Rng &b) {
         return a.key() == b.key() && a.s_.pos == b.s_.pos && a.s_.K == b.s_.K;
