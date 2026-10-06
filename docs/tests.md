@@ -12,9 +12,35 @@ make reject                         # tests/reject_widened.cu must not compile
 
 ## Suite
 
-`tests/test_cuda.cu` checks every vector of the specification, compares device fills and
-device scalar draws with reference stream dumps in `tests/data` (the bool, u8 and f16 dumps
-through the public launchers), and compares device fills at random keys,
+## Conformance
+
+`tests/conformance` holds byte-identical copies of the `conformance/*.json` files of tandem-spec
+at f420545, and a CI job compares them with the spec. `tests/conformance.h` reads them, and the
+tests check each item of the spec's `conformance/CHECKLIST.md`. The device runs the fills and the
+`device_rng` draws, and the host (`tests/host_core.cpp`) computes each fill element from
+`core.hpp`'s per-element maps or from the scalar draws that equal it.
+
+| Checklist section | Host | Device |
+|---|---|---|
+| Fallback by global draw index | every `fill_below.json` and `normal.json` case, the shifted-start pairs | the same through the fills |
+| Width from range | `urand` and `urand64` at range 1000 and 0 | a 32-bit range into `uint64_t` elements, the u64 fill |
+| n = 0 | (fills are device only) | the seven empty cases, nothing written |
+| Odd n | `CROSS_NORMAL32[0..4]` and their ends | the same |
+| Pair rule for Float32 Box-Muller | `CROSS_NORMALF`, the pair shift, `normalf` | the same, with `device_rng` |
+| Weighted choice | tables of the vectors cases, every case, the shift, `m = 1`, invalid weights | every case, the shift, the empty fill |
+| Cut fill | (scalar draws equal the fills) | every case cut at 1, 7, 20, 21 and `n - 1`, f32 normals at even elements |
+| Block and 2^63 position boundaries | stream hashes, all five dumps, random access, `set_position` and `from_key` bounds, a draw at 2^63 - 1 | stream hashes from fills and draws, normal and exponential dumps, random access, a draw at 2^63 - 1 |
+
+A Float32 normal fill cut at an odd element would drop a sin half, so those cuts move to the next
+pair. The device's Float32 normals are not bit exact, so the Float32 normal dump is a host check.
+This library has no UInt128, Char or complex fills, so their stream hashes and the complex block
+boundary are not checked, and
+its fills have no error channel, so a fill whose end reaches 2^64 is not rejected.
+
+## Suite
+
+`tests/test_cuda.cu` checks every vector of the specification and the conformance cases above,
+and compares device fills at random keys,
 chunk lengths, positions, lengths and output alignments with the reference C implementation
 compiled into the test (a checkout at `TANDEM_C`). One mixed sequence of draws on a device
 generator, with bounded draws at small and at rejecting ranges, normals, `at_*`, `fork`,
@@ -27,31 +53,27 @@ equals the whole fill for both widths, the fused low-bound and wider outputs and
 Outputs narrower than the draw, 16 and 8 bits, equal the plain fill plus the low bound. f64 normal
 fills equal tandem-c's `tandem_fill_normal_f64` byte for byte, end positions included, at random
 keys, `K`, start slots, lengths up to 2^21, and outputs on and 8 bytes off 16-byte alignment, which
-covers both kernels and both store paths, about 43000 misses and 570 tail values. They also match
-tandem-c's `tests/cross_normal.h` rows and its hashes of a Python implementation of Appendix A,
-2e5 elements from bits 0 and 2373. A normal fill cut at an odd element, at a missed element and
+covers both kernels and both store paths, about 43000 misses and 570 tail values. A normal fill cut at an odd element, at a missed element and
 just after it equals the whole fill. Fills from every first draw modulo 16, which covers the octet
 stores, equal tandem-c too. Fills on two streams at once, of growing and shrinking lengths, and
 fills captured into a graph and launched twice, equal it as well. f32 normal fills are compared with the host Box-Muller step
 on the C library's uniform fills, at every start slot, odd and even `n`, to 16 ulps + 2.1e-6 (4 ulps
-with `TANDEM_PRECISE_F32_NORMAL`), and with tandem-c's fixture. `tests/cross_fill_normal.h`
-matches exactly in f64 and to the same tolerance in f32. An empty f64 normal fill aligns the
+with `TANDEM_PRECISE_F32_NORMAL`). An empty f64 normal fill aligns the
 position to 64 bits, the f32 one leaves it alone. Exponential fills equal tandem-c's
 `tandem_fill_exponential_f64` and `_f32` byte for byte at random keys, `K`, start slots and
-lengths up to 2^22, and match `tests/cross_fill_exponential.h` and tandem-c's
-`tests/cross_exponential.h` exactly. The f32 map equals tandem-c's arithmetic for all 2^24
+lengths up to 2^22. The f32 map equals tandem-c's arithmetic for all 2^24
 Float32 draws on the device and on the host, which covers the device division without its range
 check. The device generator's `exponential()` and `exponentialf()` equal the C library's scalar
-draws. The f32 normal's device square root equals the IEEE square root on the radius of every Float32 draw. A generator is checked by running mixed fills of every width through it and through the C
+draws. Choice fills equal tandem-c's `tandem_fill_choice` at random keys, `K`, starts, lengths,
+tables and output alignments, through the tile and the direct kernel, and `device_rng::choice`
+equals `tandem_choice`. The f32 normal's device square root equals the IEEE square root on the radius of every Float32 draw. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `tests/host_core.cpp` (`make host`) builds `core.hpp` as C++17 with clang and
 gcc and compares the scalar generator with the C library, because tandem-kokkos, tandem-fortran
-and tandem-torch include it with their own standards. It hashes 1e6 f64 and 2e6 - 1 f32 normals
-from five start positions and checks the values of tandem-c's `tests/test_normal_bits.c`, checks
-its Python-reference hashes, compares the f64 rows of `tests/cross_fill_normal.h` with tandem-c's
-`tests/cross_normal.h` byte for byte, and hashes 1e6 f64 and 1e6 f32 exponentials against
-`tests/test_exponential_bits.c`. `./tests/host_core --dump` writes the bytes of tandem-c's
+and tandem-torch include it with their own standards. Beyond the conformance cases, `choice_build`
+equals `tandem_choice_build` entry for entry for random weights that span zeros, subnormals and
+`DBL_MAX`, and `Rng::choice` equals `tandem_choice`. `./tests/host_core --dump` writes the bytes of tandem-c's
 `tools/dump_normals`. The hashes hold on the M4 with clang and gcc 16, and on x86 with clang 20 and
 gcc 14 under `-mavx2 -mfma`, also with `-ffp-contract=fast` and `-march=native`.
 
@@ -62,7 +84,7 @@ Kolmogorov-Smirnov and Anderson-Darling tests at `p > 0.001`. On the A100 the la
 
 `tests/test_thrust.cu` (`make thrust`) checks that the functors and iterators equal the fills at
 random keys, `K`, positions and lengths, for every type and for bounded ranges that reject, that
-they match the stream dumps, and that `thrust::reduce`, `thrust::copy_n` and
+the uniform functors hash to `hashes.json`, and that `thrust::reduce`, `thrust::copy_n` and
 `cub::DeviceReduce::Sum` read an iterator correctly. Normals match the fills to the tolerances in [design](design.md).
 
 `tests/reject_widened.cu` (`make reject`) is a negative compile test. A kind with 16-bit draws into
@@ -71,7 +93,7 @@ draws per 8 bytes and would leave half of each block unwritten. Its 32-bit contr
 
 ## CI
 
-GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80`, runs `make reject`,
-and checks
+GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80`, runs `make reject`
+and `make host`, compares `tests/conformance` with tandem-spec f420545, and checks
 that `tests/vectors.h` and `include/tandem/normal_tables.hpp` match the spec repository's
 `vectors.json` and `tables/normal_f64_zig1024.json`.

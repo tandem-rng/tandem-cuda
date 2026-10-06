@@ -67,6 +67,13 @@ __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float
 - `tandem::fill_exponential_f64/f32(key, pos, K, out, n, stream)`: `n` standard exponentials
   `-ln(1 - u)`, one uniform each, as `Rng::exponential()` or `exponentialf()` calls, bit
   identical to tandem-c. Not part of the specification.
+- `tandem::fill_choice(key, pos, K, table, out, n, stream)`: `n` weighted choice indices as
+  `uint32_t`, element `i` from UInt64 draw `i` through an alias table, as `Rng::choice(table)`
+  calls, bit identical to tandem-c's `tandem_fill_choice`. Build the table on the host with
+  `tandem::choice_build(table, weights, m, cut, alias)` from `core.hpp`, which fills the caller's
+  `m` cut and `m` alias entries and returns false for invalid weights, then copy the two arrays to
+  the device and point `table.cut` and `table.alias` at the copies. `tandem::choice_of(table, r)`
+  maps one draw on hosts and devices. Appendix C of the specification.
 - `tandem::generator`: a host handle with public `key`, `pos` and `K`, built by `from_key` or
   `seed`. Its `fill_*` methods (every fill above, with the range first for the bounded ones) take
   the output pointer, `n` and a stream, fill from `pos`, and set `pos` to the position the
@@ -79,9 +86,12 @@ __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float
   `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`
   (one ziggurat draw) and `normal2()` (two), `normalf()`/`normalf2()` by Box-Muller in float
   from two f32 uniforms, `exponential()` and `exponentialf()`, `at_urand/urand64/frand/drand(i)`,
-  `child`, `split`, `sub` and `fork`. Bounded draws, normals and exponentials are not part of the specification.
+  `choice(table)`, `child`, `split`, `sub` and `fork`. Bounded draws, normals, exponentials and
+  weighted choice are not part of the specification. `tandem::Rng::set_position(p)` and
+  `from_key` reject a start `p >= 2^63`: `set_position` returns false and keeps the state, and
+  `from_key` keeps position 0.
   They match `tandem_u32_below`, `tandem_u64_below`, `tandem_normal_f64` and
-  `tandem_exponential_f64` and `_f32` of the C library.
+  `tandem_exponential_f64` and `_f32` and `tandem_choice` of the C library.
 - `tandem_thrust.cuh`: Thrust and CUB adapters. `tandem::uniform<T>` (u32, u64, f32, f64),
   `tandem::below<T>` (u32, u64) and `tandem::normal<T>` (f32, f64) are functors from an index `i`
   to element `i` of the fill of the same type, built on the device generator's random access.

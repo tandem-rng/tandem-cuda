@@ -19,12 +19,8 @@ the global draw index `align(pos, w) / w + e` (spec Appendix A), so a fill cut a
 boundary, each piece starting where the last ended, equals the whole fill.
 Those two purposes are reserved. A rejection has probability `(2^32 mod range) / 2^32`, so
 ranges that are powers of two never reject, and a fill without rejections equals the sequential
-loop. `range = 0` returns 0 and still consumes the draw. `tests/cross_fill_below.h` holds fixtures for
-ports, bounded fills of 64 elements at several ranges from the key of seed 42, `K = 32`, with the
-rejection counts: `CROSS_BELOW32` and `CROSS_BELOW64` at position 0, where `g = e`, and
-`CROSS_BELOW32_AT` and `CROSS_BELOW64_AT` at the bit positions 1 and 12345 of tandem-c's fixtures,
-where `g` differs from `e`. Regenerate it with `make cross`, which needs only a host
-C++ compiler and `core.hpp`.
+loop. `range = 0` returns 0 and still consumes the draw. The spec's `conformance/fill_below.json` holds
+the fixtures for ports, which `tests/conformance` copies.
 
 ## Normals
 
@@ -127,10 +123,8 @@ a block holds two pairs and a start at an odd Float32 draw makes some span two b
 bit, because libm float functions differ. The host version of the f32 step takes its angle in
 double and rounds the results, because a float angle `2 pi b` is off by up to `2 pi b 2^-24`
 where `sincospif` is not. The uniforms are exact, and everything else in this library is bit for
-bit. `tests/cross_fill_normal.h` holds normal fixtures for ports, from the host code: f64 ziggurat
-fills at the six starts of tandem-c's `tests/cross_normal.h`, with misses of every kind, exact
-everywhere, and f32 fills at even and odd starts, exact on hosts and to the tolerances above on
-devices.
+bit. The spec's `conformance/normal.json` holds the normal fixtures for ports,
+which match exactly in f64 and on hosts in f32, and to the tolerances above on devices.
 
 ## Exponentials
 
@@ -146,8 +140,8 @@ cannot change the bits, and every host and device returns tandem-c's values, whi
 byte for byte. Building device code with `-use_fast_math` or `-prec-div=false` changes the f64
 division and breaks that. The maximum error is 1.1e-15 relative in f64 and 2.8e-7 in f32. The
 fills run the direct kernel, because the map makes them compute bound and the tile kernel's
-separate write phase lost 7 to 13 % on the A100. `tests/cross_fill_exponential.h` holds fixtures
-for ports at five start positions, unaligned ones included.
+separate write phase lost 7 to 13 % on the A100. The spec's `conformance/exponential.json` holds
+the fixtures for ports.
 
 The reference logarithm multiplies by -4 and halves the result. `neg_log_f64` and
 `exponential_f32` move those powers of two into the operands instead: the numerator `2 - 2m`
@@ -178,3 +172,19 @@ on 32 f64 lanes per SM. The f64 normal's table pass runs at 1270 GiB/s, and its 
 takes 0.3 ms of the 1.9 ms of a 2^28 fill. Each miss seeds two child keys and its fallback chunk,
 three runs of F, before its wedge test. A table in shared memory, the misses kernel at four
 blocks per SM, and the fallback's `sub` key computed once on the host gained nothing there.
+
+## Weighted choice
+
+`fill_choice` draws indices in `[0, m)` with probability proportional to Float64 weights, by the
+alias table of Appendix C of the specification. `choice_build` in `core.hpp` builds the table on
+the host in exact integers: it scales the weights so that their total is just below 2^63, rounds
+each one up, gives the rounding excess to the largest, and pairs short columns with full ones by
+Vose's method. Column `j` then holds mass `cut[j]` of index `j` and `capacity - cut[j]` of
+`alias[j]`. The map of one UInt64 draw `r` picks column `j = floor(r m / 2^64)` and compares
+`floor((r m mod 2^64) capacity / 2^64)` with `cut[j]`. Both are integer operations, so every host
+and device returns tandem-c's indices. Element `i` of a fill maps draw `i` of the plain UInt64
+fill, so a fill consumes 64 bits per element, never retries, equals the scalar `choice` calls, and
+a fill cut anywhere equals the whole fill. An empty fill aligns the position to 64 bits, as an
+empty uniform fill does. The fill is a kind of the uniform fill kernels: the map runs in the
+store, and the two table reads go through the read-only cache. `core.hpp` holds the build and the
+map, so tandem-kokkos and tandem-sycl share them.
