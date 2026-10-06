@@ -16,7 +16,8 @@ make reject                         # tests/reject_widened.cu must not compile
 
 `tests/conformance` holds byte-identical copies of the `conformance/*.json` files of tandem-spec
 at f420545, and a CI job compares them with the spec. `tests/conformance.h` reads them, and the
-tests check each item of the spec's `conformance/CHECKLIST.md`. The device runs the fills and the
+tests check each item of the spec's `conformance/CHECKLIST.md` at b31af72, whose JSON files equal
+f420545's. The device runs the fills and the
 `device_rng` draws, and the host (`tests/host_core.cpp`) computes each fill element from
 `core.hpp`'s per-element maps or from the scalar draws that equal it.
 
@@ -28,14 +29,15 @@ tests check each item of the spec's `conformance/CHECKLIST.md`. The device runs 
 | Odd n | `CROSS_NORMAL32[0..4]` and their ends | the same |
 | Pair rule for Float32 Box-Muller | `CROSS_NORMALF`, the pair shift, `normalf` | the same, with `device_rng` |
 | Weighted choice | tables of the vectors cases, every case, the shift, `m = 1`, invalid weights | every case, the shift, the empty fill |
-| Cut fill | (scalar draws equal the fills) | every case cut at 1, 7, 20, 21 and `n - 1`, f32 normals at even elements |
+| Cut fill | (scalar draws equal the fills) | every case cut at 1, 7, 20, 21 and `n - 1`, f32 normals at 2, 8, 20 and the largest even element below `n` |
 | Block and 2^63 position boundaries | stream hashes, all five dumps, random access, `set_position` and `from_key` bounds, a draw at 2^63 - 1 | stream hashes from fills and draws, normal and exponential dumps, random access, a draw at 2^63 - 1 |
 
-A Float32 normal fill cut at an odd element would drop a sin half, so those cuts move to the next
-pair. The device's Float32 normals are not bit exact, so the Float32 normal dump is a host check.
+The device's Float32 normals are not bit exact, so the Float32 normal dump is a host check.
 This library has no UInt128, Char or complex fills, so their stream hashes and the complex block
 boundary are not checked, and
-its fills have no error channel, so a fill whose end reaches 2^64 is not rejected.
+its fills have no error channel, so a fill whose end reaches 2^64 is not rejected, although the
+API can express that length. `device_rng` and `generator` take any start, so the start bounds are
+checked on `Rng` alone.
 
 ## Suite
 
