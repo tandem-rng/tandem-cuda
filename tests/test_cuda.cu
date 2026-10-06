@@ -1218,8 +1218,8 @@ static bool same_values(const conf::Case &c, const std::vector<uint64_t> &got, d
 // fills: values, end, and for n = 0 no write. The fallback of a rejected bounded element or a
 // missed Float64 normal is keyed by the global draw index, which the shifted-start pairs show on
 // the device's own output. Each case cut at elements 1, 7, 20, 21 and n - 1 equals the whole
-// fill: a Float32 normal fill pairs its elements, so its odd cuts move up to the next pair. The
-// scalar device_rng draws equal each normal, exponential and choice fill, end included.
+// fill. A Float32 normal fill is cut only at pair boundaries, at 2, 8, 20 and the largest even
+// element below n, since an odd cut drops a sin half. The scalar device_rng draws equal each normal, exponential and choice fill, end included.
 static void test_conformance_fills(const char *dir) {
     std::vector<std::pair<std::string, std::vector<uint64_t>>> out; // device output by id
     for (const char *file : {"fill_below.json", "normal.json", "exponential.json", "choice.json"}) {
@@ -1245,8 +1245,10 @@ static void test_conformance_fills(const char *dir) {
                 CHECK(whole.host()[0] == ~0ull);
                 continue;
             }
-            for (size_t k : {(size_t)1, (size_t)7, (size_t)20, (size_t)21, c.n - 1}) {
-                if (c.kind == "fill_normal_f32") k += k & 1;
+            const bool pairs = c.kind == "fill_normal_f32";
+            const std::vector<size_t> cuts = pairs ? std::vector<size_t>{2, 8, 20, (c.n - 1) & ~(size_t)1}
+                                                   : std::vector<size_t>{1, 7, 20, 21, c.n - 1};
+            for (size_t k : cuts) {
                 if (k == 0 || k >= c.n) continue;
                 tandem::generator h = tandem::generator::from_key(c.key, c.start, c.K);
                 dev<uint64_t> pieces(c.n + 1);
