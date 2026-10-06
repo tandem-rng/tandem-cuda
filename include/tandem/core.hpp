@@ -784,16 +784,24 @@ class Rng : public Draws<Rng> {
         s_.init(key, 0, K);
     }
 
+    /* A start pos >= 2^63 is rejected as set_position rejects it: the generator keeps position 0. */
     TANDEM_FN static Rng from_key(const Key &key, uint64_t pos = 0, uint32_t K = 0) {
         Rng r;
-        r.s_.init(key.w, pos, K);
+        r.s_.init(key.w, 0, K);
+        r.set_position(pos);
         return r;
     }
 
     TANDEM_FN Key key() const { return Key{{s_.key[0], s_.key[1], s_.key[2], s_.key[3]}}; }
     TANDEM_FN uint64_t position() const { return s_.pos; }
     TANDEM_FN uint32_t chunk_length() const { return s_.K; }
-    TANDEM_FN void set_position(uint64_t p) { s_.pos = p; }
+    /* Move to bit position p. Return false and change nothing when p >= 2^63, the spec's limit
+     * for a start position. */
+    TANDEM_FN bool set_position(uint64_t p) {
+        if (p >> 63) return false;
+        s_.pos = p;
+        return true;
+    }
 
     TANDEM_FN friend bool operator==(const Rng &a, const Rng &b) {
         return a.key() == b.key() && a.s_.pos == b.s_.pos && a.s_.K == b.s_.K;
