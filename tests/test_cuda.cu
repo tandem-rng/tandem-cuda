@@ -1085,6 +1085,23 @@ static void test_exponential_f32_all() {
     CHECK(bad_host == 0);
 }
 
+__global__ void radius_sqrt_kernel(uint32_t *bad) {
+    uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    float x = -2.0f * logf(1.0f - tandem::to_f32(k << 8));
+    if (__float_as_uint(__fsqrt_rn(x)) != __float_as_uint(tandem::detail::sqrt_rn_nonneg(x)))
+        atomicAdd(bad, 1u);
+}
+
+// The f32 normal's square root without the range check equals the IEEE square root on the radius
+// of every one of the 2^24 Float32 draws, zero included.
+static void test_radius_sqrt_all() {
+    dev<uint32_t> bad(1);
+    CUDA_CHECK(cudaMemset(bad.p, 0, 4));
+    radius_sqrt_kernel<<<(1u << 24) / 256, 256>>>(bad.p);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CHECK(bad.host()[0] == 0);
+}
+
 static void test_exponential() {
     std::mt19937_64 gen(2718);
     check_exponential<double, tandem_fill_exponential_f64, 64, tandem::fill_exponential_f64>(gen, "f64");
@@ -1260,6 +1277,7 @@ int main(int argc, char **argv) {
     test_cross_below();
     test_cut_below();
     test_normal();
+    test_radius_sqrt_all();
     test_normal64();
     test_normal64_octets();
     test_normal_reference();

@@ -364,6 +364,22 @@ inline float sqrt_(float x) { return __builtin_elementwise_sqrt(x); }
 #else
 TANDEM_FN float sqrt_(float x) { return std::sqrt(x); }
 #endif
+/* The IEEE square root of x = 0 or 2^-101 <= x < infinity. On a device it is the fast path of the
+ * IEEE square root without its range check and slow path, which only zero, tiny, infinite and
+ * negative inputs need, and zero keeps its sign. tests/test_cuda.cu checks it against __fsqrt_rn
+ * for the radius of every Float32 draw. */
+TANDEM_FN float sqrt_rn_nonneg(float x) {
+#if defined(__CUDA_ARCH__)
+    float r, s, h;
+    asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+    asm("mul.ftz.f32 %0, %1, %2;" : "=f"(s) : "f"(x), "f"(r));
+    asm("mul.ftz.f32 %0, %1, 0f3F000000;" : "=f"(h) : "f"(r));
+    float y = __fmaf_rn(__fmaf_rn(-s, s, x), h, s);
+    return x > 0.0f ? y : x;
+#else
+    return std::sqrt(x);
+#endif
+}
 /* Every multiply-add of the normal loops is an explicit fused multiply-add, so that every
  * compiler and target gives the same bits, as in tandem-c. Without a fused instruction std::fma
  * is a correct but slow library call that cannot vectorize: build with -mfma on x86. */
@@ -456,7 +472,7 @@ TANDEM_NOINLINE_NOFMA inline void normal_block_f32(const float *__restrict u,
 /* The same in float: on a device precise logf and sincospif, on a host normal_block_f32. */
 TANDEM_FN Pair2<float> box_muller2_f32(float a, float b) {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    float r = std::sqrt(-2.0f * std::log(1.0f - a)), s, c;
+    float r = detail::sqrt_rn_nonneg(-2.0f * std::log(1.0f - a)), s, c;
     sincospif(2.0f * b, &s, &c);
     return Pair2<float>{r * c, r * s};
 #else
@@ -469,7 +485,7 @@ TANDEM_FN Pair2<float> box_muller2_f32(float a, float b) {
 /* The cos half alone: Box-Muller from two draws a and b in [0, 1), u = 1 - a in (0, 1]. */
 TANDEM_FN float box_muller_f32(float a, float b) {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
-    return std::sqrt(-2.0f * std::log(1.0f - a)) * std::cos(2.0f * 3.14159265358979323846f * b);
+    return detail::sqrt_rn_nonneg(-2.0f * std::log(1.0f - a)) * std::cos(2.0f * 3.14159265358979323846f * b);
 #else
     return box_muller2_f32(a, b).z0;
 #endif

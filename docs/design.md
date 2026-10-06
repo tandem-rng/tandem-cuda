@@ -108,7 +108,9 @@ the other starts, so those keep the kernel above.
 elements `2j` (cos half) and `2j + 1` (sin half), comes from the draws `2j` and `2j + 1`, as the
 flattened `Rng::normalf2()` calls, with `u = 1 - d[2j]`, `v = d[2j + 1]`, precise `logf` and
 `sqrtf`. An odd `n` uses the cos half of its last pair and still advances past both draws, and an
-empty fill returns `pos` unchanged. The device fill takes the
+empty fill returns `pos` unchanged. On a device the square root is the fast path of `sqrtf` without
+its range check and slow path, `sqrt_rn_nonneg`, which equals the IEEE square root on the radius of every
+Float32 draw and took the A100 fill from 1172 to 1204 GiB/s. The device fill takes the
 angle through the fast `__sincosf` on `2 pi (v - 0.5)`, which is accurate on `[-pi, pi]`, because
 the precise `sincospif` made the fill compute bound at 1065 GiB/s against 1300 memory bound. The
 result differs from the precise step by at most 1.73e-6 absolute over the random fills and 7.2e-7
