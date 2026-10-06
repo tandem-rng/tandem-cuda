@@ -1,5 +1,5 @@
-// The Thrust adapters: element i of a functor or iterator equals element i of the fill, and
-// matches the stream dumps. Run on a GPU host: make thrust
+// The Thrust adapters: element i of a functor or iterator equals element i of the fill, and the
+// uniform streams hash to the spec's hashes.json. Run on a GPU host: make thrust
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +13,7 @@
 #include <thrust/transform.h>
 
 #include "../tandem_thrust.cuh"
+#include "conformance.h"
 
 static int failures;
 
@@ -54,39 +55,23 @@ template <class T> static bool close(const std::vector<T> &a, const std::vector<
     return true;
 }
 
-template <class T> static std::vector<T> slurp(const char *dir, const char *name) {
-    char path[512];
-    std::snprintf(path, sizeof path, "%s/%s", dir, name);
-    FILE *f = std::fopen(path, "rb");
-    if (!f) {
-        std::printf("FAIL cannot open %s\n", path);
-        failures++;
-        return {};
-    }
-    std::fseek(f, 0, SEEK_END);
-    size_t len = (size_t)std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::vector<T> v(len / sizeof(T));
-    if (std::fread(v.data(), 1, len, f) != len) failures++;
-    std::fclose(f);
-    return v;
-}
-
 static const uint32_t KEY1234[4] = {1, 2, 3, 4};
 
-static void test_dumps(const char *dir) {
+template <class T> static std::string hash(const std::vector<T> &v) {
+    return conf::sha256(v.data(), v.size() * sizeof(T));
+}
+
+// The functors' uniform streams of hashes.json.
+static void test_streams(const char *dir) {
+    const conf::Json h = conf::load(dir, "hashes.json");
+    auto want = [&](const char *f) { return conf::stream(h, f)["sha256"].s; };
     uint32_t s42[4];
     tandem::seed_key(42, 0, s42);
-    auto u32 = slurp<uint32_t>(dir, "k1234_K32_u32.bin");
-    CHECK(!u32.empty() && (transformed<tandem::uniform<uint32_t>, uint32_t>(tandem::uniform<uint32_t>(KEY1234, 32), u32.size()) == u32));
-    auto u32k8 = slurp<uint32_t>(dir, "k1234_K8_u32.bin");
-    CHECK(!u32k8.empty() && (transformed<tandem::uniform<uint32_t>, uint32_t>(tandem::uniform<uint32_t>(KEY1234, 8), u32k8.size()) == u32k8));
-    auto u64 = slurp<uint64_t>(dir, "k1234_K32_u64.bin");
-    CHECK(!u64.empty() && (transformed<tandem::uniform<uint64_t>, uint64_t>(tandem::uniform<uint64_t>(KEY1234, 32), u64.size()) == u64));
-    auto f64 = slurp<double>(dir, "seed42_K32_f64.bin");
-    CHECK(!f64.empty() && (transformed<tandem::uniform<double>, double>(tandem::uniform<double>(s42, 32), f64.size()) == f64));
-    auto f32 = slurp<float>(dir, "seed42_K32_f32.bin");
-    CHECK(!f32.empty() && (transformed<tandem::uniform<float>, float>(tandem::uniform<float>(s42, 32), f32.size()) == f32));
+    CHECK((hash(transformed<tandem::uniform<uint32_t>, uint32_t>(tandem::uniform<uint32_t>(KEY1234, 32), 65536)) == want("k1234_K32_u32.bin")));
+    CHECK((hash(transformed<tandem::uniform<uint32_t>, uint32_t>(tandem::uniform<uint32_t>(KEY1234, 8), 16384)) == want("k1234_K8_u32.bin")));
+    CHECK((hash(transformed<tandem::uniform<uint64_t>, uint64_t>(tandem::uniform<uint64_t>(KEY1234, 32), 2048)) == want("k1234_K32_u64.bin")));
+    CHECK((hash(transformed<tandem::uniform<double>, double>(tandem::uniform<double>(s42, 32), 4096)) == want("seed42_K32_f64.bin")));
+    CHECK((hash(transformed<tandem::uniform<float>, float>(tandem::uniform<float>(s42, 32), 4096)) == want("seed42_K32_f32.bin")));
 }
 
 // Functors against the fills at random keys, K, positions and lengths.
@@ -159,8 +144,8 @@ static void test_iterators() {
 }
 
 int main(int argc, char **argv) {
-    const char *dir = argc > 1 ? argv[1] : "tests/data";
-    test_dumps(dir);
+    const char *dir = argc > 1 ? argv[1] : "tests/conformance";
+    test_streams(dir);
     test_against_fills();
     test_iterators();
     if (failures) {

@@ -4,9 +4,6 @@ tools/normal_stats
 *.o
 .pixi/
 pixi.lock
-tools/gen_cross_fill_below
-tools/gen_cross_fill_normal
-tools/gen_cross_fill_exponential
 tests/host_core
 tests/test_clangcuda
 tests/test_thrust

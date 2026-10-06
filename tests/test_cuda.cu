@@ -1,20 +1,18 @@
-// Spec vectors, the Julia stream dumps, and agreement with the C library at random keys and
-// positions. Run on a GPU host: make test
+// Spec vectors, the spec's conformance cases in tests/conformance, and agreement with the C library
+// at random keys and positions. Run on a GPU host: make test
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "../tandem.cuh"
 #include "vectors.h"
-#include "cross_fill_below.h"
-#include "cross_fill_exponential.h"
-#include "cross_fill_normal.h"
-// tandem-c's, through -I$(TANDEM_C)
-#include "tests/cross_exponential.h"
-#include "tests/cross_normal.h"
+#include "conformance.h"
 
 extern "C" {
 #include "tandem.h"
@@ -147,98 +145,7 @@ static void test_vectors() {
     for (const auto &v : VEC_SEED_U32) CHECK(su32[v.index] == v.value);
 }
 
-// ---- Dumps --------------------------------------------------------------------------------
-
-template <class T> static std::vector<T> slurp(const char *dir, const char *name) {
-    char path[512];
-    std::snprintf(path, sizeof path, "%s/%s", dir, name);
-    FILE *f = std::fopen(path, "rb");
-    if (!f) {
-        std::printf("FAIL cannot open %s\n", path);
-        failures++;
-        return {};
-    }
-    std::fseek(f, 0, SEEK_END);
-    size_t len = (size_t)std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::vector<T> v(len / sizeof(T));
-    if (std::fread(v.data(), 1, len, f) != len) failures++;
-    std::fclose(f);
-    return v;
-}
-
 static const uint32_t KEY1234[4] = {1, 2, 3, 4};
-
-template <class T, T (tandem::device_rng::*draw)()>
-static void check_dump(const char *dir, const char *name, const uint32_t key[4], uint32_t K) {
-    std::vector<T> want = slurp<T>(dir, name);
-    if (want.empty()) return;
-    std::vector<T> fill = device_fill<T>(key, 0, K, want.size());
-    std::vector<T> draws = device_draws<T, draw>(key, 0, K, want.size());
-    for (size_t i = 0; i < want.size(); i++) {
-        if (fill[i] != want[i]) {
-            std::printf("FAIL %s: fill differs at element %zu\n", name, i);
-            failures++;
-            break;
-        }
-    }
-    for (size_t i = 0; i < want.size(); i++) {
-        if (draws[i] != want[i]) {
-            std::printf("FAIL %s: device draw differs at element %zu\n", name, i);
-            failures++;
-            break;
-        }
-    }
-}
-
-// Public launchers fill whatever pointer they get, so the dump comparison needs no type.
-template <class T, class L> static std::vector<T> public_fill(L launch, size_t n) {
-    dev<T> d(n + 2);
-    launch(d.p, n);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    return d.host();
-}
-
-static uint64_t fill_bool_bytes(const uint32_t key[4], uint64_t pos, uint32_t K, uint8_t *out,
-                                size_t n, cudaStream_t stream) {
-    return tandem::fill_bool(key, pos, K, reinterpret_cast<bool *>(out), n, stream);
-}
-
-template <class T, uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
-static void check_public_dump(const char *dir, const char *name, const uint32_t key[4]) {
-    std::vector<T> want = slurp<T>(dir, name);
-    if (want.empty()) return;
-    auto got = public_fill<T>([&](T *p, size_t n) { launch(key, 0, 32, p, n, 0); }, want.size());
-    got.resize(want.size()); // the device buffer has two spare elements
-    if (got != want) {
-        size_t i = 0;
-        while (i < want.size() && got[i] == want[i]) i++;
-        std::printf("FAIL %s: public fill differs from the dump at element %zu of %zu\n", name, i,
-                    want.size());
-        failures++;
-    }
-}
-
-static void test_dumps(const char *dir) {
-    tandem::device_rng s42 = tandem::device_rng::seed(42, 0, 32);
-    check_dump<uint32_t, &tandem::device_rng::next_u32>(dir, "k1234_K32_u32.bin", KEY1234, 32);
-    check_dump<uint64_t, &tandem::device_rng::next_u64>(dir, "k1234_K32_u64.bin", KEY1234, 32);
-    check_dump<uint32_t, &tandem::device_rng::next_u32>(dir, "k1234_K8_u32.bin", KEY1234, 8);
-    check_dump<double, &tandem::device_rng::next_f64>(dir, "seed42_K32_f64.bin", s42.key, 32);
-    check_dump<float, &tandem::device_rng::next_f32>(dir, "seed42_K32_f32.bin", s42.key, 32);
-    std::vector<uint8_t> bools = slurp<uint8_t>(dir, "seed42_K32_bool.bin");
-    auto got = device_bools(s42.key, 0, 32, bools.size());
-    for (size_t i = 0; i < bools.size(); i++)
-        if (got[i] != bools[i]) {
-            std::printf("FAIL bool draws differ at element %zu\n", i);
-            failures++;
-            break;
-        }
-    // The sub-word fills, through the public launchers.
-    check_public_dump<uint8_t, fill_bool_bytes>(dir, "seed42_K32_bool.bin", s42.key);
-    check_public_dump<uint8_t, tandem::fill_u8>(dir, "seed42_K32_u8.bin", s42.key);
-    check_public_dump<uint16_t, tandem::fill_f16_bits>(dir, "seed42_K32_f16bits.bin", s42.key);
-}
 
 // ---- Against the C library at random keys and positions -------------------------------------
 
@@ -629,39 +536,6 @@ static void test_below() {
         check_below_sequential<uint64_t, decltype(l64), tandem_u64_below>(gen, "u64", r, l64);
 }
 
-// The fixtures other ports match, which include the fallback stream of rejected draws.
-static void test_cross_below() {
-    CHECK(words_equal(CROSS_FILL_KEY, tandem::device_rng::seed(42, 0, 32).key));
-    for (const auto &f : CROSS_BELOW32) {
-        dev<uint32_t> d(64 + 2);
-        tandem::fill_u32_below(CROSS_FILL_KEY, 0, 32, f.range, d.p, 64);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        auto got = d.host();
-        CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
-    }
-    for (const auto &f : CROSS_BELOW64) {
-        dev<uint64_t> d(64 + 2);
-        tandem::fill_u64_below(CROSS_FILL_KEY, 0, 32, f.range, d.p, 64);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        auto got = d.host();
-        CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
-    }
-    for (const auto &f : CROSS_BELOW32_AT) {
-        dev<uint32_t> d(64 + 2);
-        tandem::fill_u32_below(CROSS_FILL_KEY, f.start, 32, f.range, d.p, 64);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        auto got = d.host();
-        CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
-    }
-    for (const auto &f : CROSS_BELOW64_AT) {
-        dev<uint64_t> d(64 + 2);
-        tandem::fill_u64_below(CROSS_FILL_KEY, f.start, 32, f.range, d.p, 64);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        auto got = d.host();
-        CHECK(std::memcmp(got.data(), f.out, sizeof f.out) == 0);
-    }
-}
-
 // A bounded fill cut at any element boundary equals the whole fill, rejected draws included,
 // because the fallback is keyed by the global draw index. Each piece starts where the last
 // ended. The fused low-bound and wider-output kernels are covered through `launch`.
@@ -727,53 +601,6 @@ static void test_cut_below() {
 // 5.77. That passes the spec's 1e-6 for about one value in 10^6: a = 0x1.fff256p-1 and
 // b = 0x1.040388p-2 give -0.10545215 against the host's -0.105453432.
 constexpr double F32_FILL_ABS = 2.1e-6;
-
-// This repository's normal fixtures, at even and odd starts.
-template <class T, class F, uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
-static void check_cross_normal(const F &f, double tol) {
-    dev<T> d(f.n + 2);
-    launch(CROSS_FILL_KEY, f.pos, 32, d.p, f.n, 0);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    auto got = d.host();
-    size_t bad = 0;
-    double max_abs = 0, max_ulps = 0; // reported when tuning the float step
-    for (size_t i = 0; i < f.n; i++) {
-        double want = f.out[i], dv = std::fabs((double)got[i] - want);
-        double ulp = std::fabs(want) * 0x1p-23;
-#ifndef TANDEM_PRECISE_F32_NORMAL
-        bool ok = sizeof(T) == 4 ? dv <= 16 * ulp + F32_FILL_ABS : dv <= tol * (1.0 + std::fabs(want));
-#else
-        bool ok = dv <= tol * (1.0 + std::fabs(want));
-#endif
-        bad += !ok;
-        max_abs = std::fmax(max_abs, dv);
-        if (std::fabs(want) > 1e-2) max_ulps = std::fmax(max_ulps, dv / ulp);
-    }
-    if (sizeof(T) == 4)
-        std::printf("f32 fixture pos %llu: max deviation %.3g abs, %.3g ulps (|x| > 1e-2)\n",
-                    (unsigned long long)f.pos, max_abs, max_ulps);
-    if (bad) {
-        std::printf("FAIL normal fixture at pos %llu: %zu elements differ\n",
-                    (unsigned long long)f.pos, bad);
-        failures++;
-    }
-}
-
-static void test_cross_normal() {
-    for (const auto &f : CROSS_NORMAL64)
-        check_cross_normal<double, cross_normal64, tandem::fill_normal_f64>(f, 0.0); // exact
-    for (const auto &f : CROSS_NORMAL32)
-        check_cross_normal<float, cross_normal32, tandem::fill_normal_f32>(f, 4 * 0x1p-23);
-    // tandem-c's fixture: normalf2 calls of Rng(42) after one bit draw, which is the fill from
-    // position 1, to the device fill's 16 ulps + F32_FILL_ABS.
-    const size_t n = 2 * CROSS_NORMAL_COUNT;
-    dev<float> df(n);
-    CHECK(tandem::fill_normal_f32(CROSS_FILL_KEY, 1, 32, df.p, n) == CROSS_NORMALF_END_POS);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    std::vector<float> got = df.host();
-    for (size_t i = 0; i < n; i++)
-        CHECK(std::fabs(got[i] - CROSS_NORMALF[i]) <= 16 * 0x1p-23f * std::fabs(CROSS_NORMALF[i]) + (float)F32_FILL_ABS);
-}
 
 // Float32 normal fills: pair j is one Box-Muller step of the uniform draws 2j and 2j + 1, cos half
 // first, and an odd n drops the last sin half but still consumes both draws. The reference runs the
@@ -908,37 +735,6 @@ static void test_normal64_octets() {
                 }
             }
         }
-}
-
-static uint64_t fnv(const void *p, size_t n) {
-    const unsigned char *b = static_cast<const unsigned char *>(p);
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001b3ull;
-    return h;
-}
-
-// The f64 normals of a Python implementation written from the text of spec Appendix A, as
-// tandem-c's tests/test_normal_bits.c hashes them: 2e5 from key {1, 2, 3, 4}, K = 32, at bits 0
-// and 2373. And tandem-c's fixture rows, whose last rows hold a wedge accept, a wedge reject and a
-// tail value.
-static void test_normal_reference() {
-    const size_t n = 200000;
-    const struct {
-        uint64_t start, hash, end;
-    } ref[] = {{0, 0x0c4059ed409d578dull, 12800000}, {2373, 0x30ce40c86b295193ull, 12802432}};
-    for (const auto &f : ref) {
-        dev<double> d(n);
-        CHECK(tandem::fill_normal_f64(KEY1234, f.start, 32, d.p, n) == f.end);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        std::vector<double> got = d.host();
-        CHECK(fnv(got.data(), n * 8) == f.hash);
-    }
-    for (const auto &f : CROSS_NORMAL) {
-        dev<double> d(CROSS_NORMAL_COUNT);
-        CHECK(tandem::fill_normal_f64(CROSS_FILL_KEY, f.start, 32, d.p, CROSS_NORMAL_COUNT) == f.end_pos);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CHECK(std::memcmp(d.host().data(), f.want, sizeof f.want) == 0);
-    }
 }
 
 // A normal fill cut at any element equals the whole fill: at an odd element, at a missed element
@@ -1107,35 +903,6 @@ static void test_exponential() {
     check_exponential<double, tandem_fill_exponential_f64, 64, tandem::fill_exponential_f64>(gen, "f64");
     check_exponential<float, tandem_fill_exponential_f32, 32, tandem::fill_exponential_f32>(gen, "f32");
     test_exponential_f32_all();
-}
-
-// The exponential fixtures of this repository and of tandem-c, bit for bit on the device.
-template <class T, class F, uint64_t (*launch)(const uint32_t *, uint64_t, uint32_t, T *, size_t, cudaStream_t)>
-static void check_cross_exponential(const F &f) {
-    dev<T> d(f.n);
-    launch(CROSS_FILL_KEY, f.pos, 32, d.p, f.n, 0);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CHECK(std::memcmp(d.host().data(), f.out, f.n * sizeof(T)) == 0);
-}
-
-static void test_cross_exponential() {
-    for (const auto &f : CROSS_EXP64)
-        check_cross_exponential<double, cross_exp64, tandem::fill_exponential_f64>(f);
-    for (const auto &f : CROSS_EXP32)
-        check_cross_exponential<float, cross_exp32, tandem::fill_exponential_f32>(f);
-    // tandem-c's tests/cross_exponential.h: the Rng(42) exponentials from each start position.
-    for (const auto &f : CROSS_EXPONENTIAL) {
-        dev<double> d(CROSS_EXPONENTIAL_COUNT);
-        CHECK(tandem::fill_exponential_f64(CROSS_FILL_KEY, f.start, 32, d.p, CROSS_EXPONENTIAL_COUNT) == f.end_pos);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CHECK(std::memcmp(d.host().data(), f.want, sizeof f.want) == 0);
-    }
-    for (const auto &f : CROSS_EXPONENTIALF) {
-        dev<float> d(CROSS_EXPONENTIAL_COUNT);
-        CHECK(tandem::fill_exponential_f32(CROSS_FILL_KEY, f.start, 32, d.p, CROSS_EXPONENTIAL_COUNT) == f.end_pos);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CHECK(std::memcmp(d.host().data(), f.want, sizeof f.want) == 0);
-    }
 }
 
 // ---- Weighted choice ----------------------------------------------------------------------------
@@ -1361,28 +1128,330 @@ static void test_signed() {
     check_signed<int64_t, uint64_t, tandem::fill_i64, tandem_fill_u64>(gen, "i64");
 }
 
+// ---- Conformance cases of the spec ---------------------------------------------------------------
+
+// The scalar draws of the conformance kinds on a device_rng, as bit patterns, and its end position.
+enum class Draw { below32, below64, normal64, normal32, exp64, exp32, choice };
+
+__global__ void scalar_kernel(Draw kind, uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3,
+                              uint64_t pos, uint32_t K, uint64_t range, tandem::ChoiceTable t,
+                              uint64_t *out, size_t n, uint64_t *end) {
+    const uint32_t key[4] = {k0, k1, k2, k3};
+    tandem::device_rng r = tandem::device_rng::from_key(key, pos, K);
+    for (size_t i = 0; i < n; i++) {
+        switch (kind) {
+        case Draw::below32: out[i] = r.urand((uint32_t)range); break;
+        case Draw::below64: out[i] = r.urand64(range); break;
+        case Draw::normal64: out[i] = (uint64_t)__double_as_longlong(r.normal()); break;
+        case Draw::normal32:
+            if (i + 1 < n) {
+                tandem::Pair2<float> p = r.normalf2();
+                out[i] = __float_as_uint(p.z0);
+                out[++i] = __float_as_uint(p.z1);
+            } else {
+                out[i] = __float_as_uint(r.normalf());
+            }
+            break;
+        case Draw::exp64: out[i] = (uint64_t)__double_as_longlong(r.exponential()); break;
+        case Draw::exp32: out[i] = __float_as_uint(r.exponentialf()); break;
+        case Draw::choice: out[i] = r.choice(t); break;
+        }
+    }
+    *end = r.pos;
+}
+
+static std::vector<uint64_t> device_scalars(Draw kind, const conf::Case &c, const tandem::ChoiceTable &t,
+                                            uint64_t &end) {
+    dev<uint64_t> d(c.n + 1), e(1);
+    scalar_kernel<<<1, 1>>>(kind, c.key[0], c.key[1], c.key[2], c.key[3], c.start, c.K, c.range, t,
+                            d.p, c.n, e.p);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    end = e.host()[0];
+    std::vector<uint64_t> v = d.host();
+    v.resize(c.n);
+    return v;
+}
+
+static size_t elem_size(const std::string &kind) {
+    return kind.find("64") != std::string::npos ? 8 : 4;
+}
+
+// n elements of the fill of case c on generator g into device memory.
+static void case_fill(tandem::generator &g, const conf::Case &c, const tandem::ChoiceTable &t,
+                      void *out, size_t n) {
+    if (c.kind == "fill_below_u32") g.fill_u32_below((uint32_t)c.range, static_cast<uint32_t *>(out), n);
+    else if (c.kind == "fill_below_u64") g.fill_u64_below(c.range, static_cast<uint64_t *>(out), n);
+    else if (c.kind == "fill_normal_f64") g.fill_normal_f64(static_cast<double *>(out), n);
+    else if (c.kind == "fill_normal_f32") g.fill_normal_f32(static_cast<float *>(out), n);
+    else if (c.kind == "fill_exponential_f64") g.fill_exponential_f64(static_cast<double *>(out), n);
+    else if (c.kind == "fill_exponential_f32") g.fill_exponential_f32(static_cast<float *>(out), n);
+    else g.fill_choice(t, static_cast<uint32_t *>(out), n);
+}
+
+// The first n elements of a device buffer as bit patterns.
+static std::vector<uint64_t> patterns(const dev<uint64_t> &d, size_t n, size_t size) {
+    std::vector<unsigned char> b(n * size);
+    CUDA_CHECK(cudaMemcpy(b.data(), d.p, b.size(), cudaMemcpyDeviceToHost));
+    std::vector<uint64_t> v(n, 0);
+    for (size_t i = 0; i < n; i++) std::memcpy(&v[i], &b[i * size], size);
+    return v;
+}
+
+// Float32 normals within the spec's 16 ulps plus an absolute floor, everything else bit for bit.
+static bool same_values(const conf::Case &c, const std::vector<uint64_t> &got, double abs) {
+    if (got.size() != c.n) return false;
+    for (size_t i = 0; i < c.n; i++) {
+        if (c.kind != "fill_normal_f32") {
+            if (got[i] != c.values[i]) return false;
+            continue;
+        }
+        float g;
+        uint32_t b = (uint32_t)got[i];
+        std::memcpy(&g, &b, 4);
+        double want = c.f32(i);
+        if (!(std::fabs((double)g - want) <= 16 * 0x1p-23 * std::fabs(want) + abs)) return false;
+    }
+    return true;
+}
+
+// Every case of fill_below, normal, exponential and choice.json through the generator's device
+// fills: values, end, and for n = 0 no write. The fallback of a rejected bounded element or a
+// missed Float64 normal is keyed by the global draw index, which the shifted-start pairs show on
+// the device's own output. Each case cut at elements 1, 7, 20, 21 and n - 1 equals the whole
+// fill: a Float32 normal fill pairs its elements, so its odd cuts move up to the next pair. The
+// scalar device_rng draws equal each normal, exponential and choice fill, end included.
+static void test_conformance_fills(const char *dir) {
+    std::vector<std::pair<std::string, std::vector<uint64_t>>> out; // device output by id
+    for (const char *file : {"fill_below.json", "normal.json", "exponential.json", "choice.json"}) {
+        for (const auto &c : conf::cases(dir, file)) {
+            const size_t size = elem_size(c.kind);
+            std::unique_ptr<DeviceChoice> tb;
+            tandem::ChoiceTable t{};
+            if (!c.weights.empty()) {
+                tb.reset(new DeviceChoice(c.weights));
+                t = tb->t;
+            }
+            tandem::generator g = tandem::generator::from_key(c.key, c.start, c.K);
+            dev<uint64_t> whole(c.n + 1);
+            CUDA_CHECK(cudaMemset(whole.p, 0xff, 8 * (c.n + 1)));
+            case_fill(g, c, t, whole.p, c.n);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            std::vector<uint64_t> got = patterns(whole, c.n, size);
+            if (!same_values(c, got, F32_FILL_ABS) || (c.has_end && g.pos != c.end)) {
+                std::printf("FAIL conformance %s: device fill\n", c.id.c_str());
+                failures++;
+            }
+            if (c.n == 0) {
+                CHECK(whole.host()[0] == ~0ull);
+                continue;
+            }
+            for (size_t k : {(size_t)1, (size_t)7, (size_t)20, (size_t)21, c.n - 1}) {
+                if (c.kind == "fill_normal_f32") k += k & 1;
+                if (k == 0 || k >= c.n) continue;
+                tandem::generator h = tandem::generator::from_key(c.key, c.start, c.K);
+                dev<uint64_t> pieces(c.n + 1);
+                case_fill(h, c, t, pieces.p, k);
+                case_fill(h, c, t, reinterpret_cast<char *>(pieces.p) + k * size, c.n - k);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                if (patterns(pieces, c.n, size) != got || h.pos != g.pos) {
+                    std::printf("FAIL conformance %s: fill cut at %zu\n", c.id.c_str(), k);
+                    failures++;
+                }
+            }
+            Draw kind = c.kind == "fill_normal_f64" ? Draw::normal64
+                        : c.kind == "fill_normal_f32" ? Draw::normal32
+                        : c.kind == "fill_exponential_f64" ? Draw::exp64
+                        : c.kind == "fill_exponential_f32" ? Draw::exp32
+                        : c.kind == "fill_choice" ? Draw::choice : Draw::below32;
+            if (kind != Draw::below32) { // scalar bounded draws discard a rejection, unlike the fill
+                uint64_t end;
+                std::vector<uint64_t> s = device_scalars(kind, c, t, end);
+                if (!same_values(c, s, 1e-6) || end != g.pos) {
+                    std::printf("FAIL conformance %s: device scalar draws\n", c.id.c_str());
+                    failures++;
+                }
+            }
+            out.emplace_back(c.id, got);
+        }
+    }
+    auto of = [&](const char *suffix) -> const std::vector<uint64_t> & {
+        for (const auto &o : out)
+            if (o.first.size() >= std::strlen(suffix) &&
+                o.first.compare(o.first.size() - std::strlen(suffix), std::string::npos, suffix) == 0)
+                return o.second;
+        std::printf("FAIL conformance: no case %s\n", suffix);
+        std::exit(1);
+    };
+    // Element i of the later start equals element i + shift of the earlier one.
+    const struct {
+        const char *later, *earlier;
+        size_t shift;
+    } shifted[] = {{"CROSS_BELOW32_AT[4]", "CROSS_BELOW32[4]", 1}, {"CROSS_BELOW64_AT[6]", "CROSS_BELOW64[6]", 1},
+                   {"CROSS_NORMAL[1]", "CROSS_NORMAL[0]", 1},      {"CROSS_NORMAL32[2]", "CROSS_NORMAL32[0]", 2},
+                   {"CROSS_CHOICE[1]", "CROSS_CHOICE[0]", 1}};
+    for (const auto &s : shifted) {
+        const auto &a = of(s.later), &z = of(s.earlier);
+        CHECK(std::equal(a.begin(), a.end() - s.shift, z.begin() + s.shift));
+    }
+    const auto &nf = of("CROSS_NORMALF"), &n1 = of("CROSS_NORMAL32[1]");
+    CHECK(std::equal(n1.begin(), n1.end(), nf.begin()));
+}
+
+// below.json on device_rng. Width from range: a 32-bit range into 64-bit elements draws 32 bits per
+// element and gives CROSS_BELOW32[3], where the u64 fill of the same range gives CROSS_BELOW64[3].
+static void test_conformance_below(const char *dir) {
+    for (const auto &c : conf::cases(dir, "below.json")) {
+        uint64_t end;
+        std::vector<uint64_t> s = device_scalars(c.kind == "below_u32" ? Draw::below32 : Draw::below64, c,
+                                                 tandem::ChoiceTable{}, end);
+        CHECK(s == c.values && end == c.end);
+    }
+    auto cs = conf::cases(dir, "fill_below.json");
+    const auto &b32 = conf::find(cs, "CROSS_BELOW32[3]");
+    dev<uint64_t> d(64);
+    CHECK(tandem::fill_u32_below(b32.key, 0, 32, 1000u, (uint64_t)0, d.p, 64) == 64 * 32);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CHECK(b32.range == 1000 && d.host() == b32.values);
+}
+
+__global__ void at_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, uint64_t pos,
+                          uint32_t K, uint32_t *a32, uint64_t *a64, float *af32, double *af64,
+                          size_t n) {
+    const uint32_t key[4] = {k0, k1, k2, k3};
+    tandem::device_rng r = tandem::device_rng::from_key(key, pos, K);
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
+        a32[i] = r.at_urand(i);
+        a64[i] = r.at_urand64(i);
+        af32[i] = r.at_frand(i);
+        af64[i] = r.at_drand(i);
+    }
+}
+
+__global__ void top_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, uint64_t *out) {
+    const uint32_t key[4] = {k0, k1, k2, k3};
+    tandem::device_rng r = tandem::device_rng::from_key(key, ((uint64_t)1 << 63) - 1u, 32);
+    out[0] = r.next_u64();
+    out[1] = r.pos;
+}
+
+// hashes.json on the device: every uniform stream type this library fills, from the public fills
+// and from device_rng draws, and the Float64 normal and exponential dumps, whose fills run in
+// order on one generator per start. The Float32 normal dump needs bit-exact Box-Muller, which only
+// the host block gives, so tests/host_core.cpp checks it. Random access equals the sequential fill
+// across blocks, rows and chunks, and a UInt64 draw at 2^63 - 1 aligns to 2^63 and ends at
+// 2^63 + 64.
+static void test_conformance_hashes(const char *dir) {
+    const conf::Json hashes = conf::load(dir, "hashes.json");
+    for (const conf::Json &s : hashes["streams"].a) {
+        uint32_t key[4];
+        for (int w = 0; w < 4; w++) key[w] = (uint32_t)s["key"].a[w].hex();
+        const uint64_t pos = s["start"].u();
+        const uint32_t K = (uint32_t)s["K"].u();
+        const size_t n = (size_t)s["n"].u(), bytes = (size_t)s["bytes"].u();
+        const std::string type = s["type"].s;
+        dev<unsigned char> d(bytes);
+        std::vector<unsigned char> scalar;
+        auto from = [](const auto &v) {
+            const unsigned char *p = reinterpret_cast<const unsigned char *>(v.data());
+            return std::vector<unsigned char>(p, p + v.size() * sizeof(v[0]));
+        };
+        if (type == "UInt32") {
+            tandem::fill_u32(key, pos, K, reinterpret_cast<uint32_t *>(d.p), n);
+            scalar = from(device_draws<uint32_t, &tandem::device_rng::next_u32>(key, pos, K, n));
+        } else if (type == "UInt64") {
+            tandem::fill_u64(key, pos, K, reinterpret_cast<uint64_t *>(d.p), n);
+            scalar = from(device_draws<uint64_t, &tandem::device_rng::next_u64>(key, pos, K, n));
+        } else if (type == "Float64") {
+            tandem::fill_f64(key, pos, K, reinterpret_cast<double *>(d.p), n);
+            scalar = from(device_draws<double, &tandem::device_rng::next_f64>(key, pos, K, n));
+        } else if (type == "Float32") {
+            tandem::fill_f32(key, pos, K, reinterpret_cast<float *>(d.p), n);
+            scalar = from(device_draws<float, &tandem::device_rng::next_f32>(key, pos, K, n));
+        } else if (type == "UInt8") {
+            tandem::fill_u8(key, pos, K, d.p, n);
+            scalar = from(device_draws<uint8_t, &tandem::device_rng::next_u8>(key, pos, K, n));
+        } else if (type == "Bool") {
+            tandem::fill_bool(key, pos, K, reinterpret_cast<bool *>(d.p), n);
+            scalar = device_bools(key, pos, K, n);
+        } else if (type == "Float16") {
+            tandem::fill_f16_bits(key, pos, K, reinterpret_cast<uint16_t *>(d.p), n);
+            scalar = from(device_draws<uint16_t, &tandem::device_rng::next_f16_bits>(key, pos, K, n));
+        } else {
+            continue; // UInt128, Char and complex types have no fill here
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<unsigned char> fill = d.host();
+        CHECK(conf::sha256(fill.data(), bytes) == s["sha256"].s);
+        CHECK(scalar.size() == bytes && conf::sha256(scalar.data(), bytes) == s["sha256"].s);
+    }
+    for (const conf::Json &dm : hashes["dumps"].a) {
+        bool f32_normal = false;
+        for (const conf::Json &f : dm["draws"].a) f32_normal |= f["kind"].s == "fill_normal_f32";
+        if (f32_normal) continue;
+        uint32_t key[4];
+        for (int w = 0; w < 4; w++) key[w] = (uint32_t)dm["key"].a[w].hex();
+        uint64_t h = conf::FNV_BASIS, bytes = 0, end = 0;
+        for (const conf::Json &st : dm["starts"].a) {
+            tandem::generator g = tandem::generator::from_key(key, st.u(), (uint32_t)dm["K"].u());
+            for (const conf::Json &f : dm["draws"].a) {
+                const size_t n = (size_t)f["n"].u(), size = elem_size(f["kind"].s);
+                dev<unsigned char> d(n * size);
+                if (f["kind"].s == "fill_normal_f64") g.fill_normal_f64(reinterpret_cast<double *>(d.p), n);
+                else if (f["kind"].s == "fill_exponential_f64") g.fill_exponential_f64(reinterpret_cast<double *>(d.p), n);
+                else g.fill_exponential_f32(reinterpret_cast<float *>(d.p), n);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                std::vector<unsigned char> b = d.host();
+                h = conf::fnv1a(h, b.data(), b.size());
+                bytes += b.size();
+            }
+            end = g.pos;
+        }
+        CHECK(bytes == dm["bytes"].u() && h == dm["fnv1a"].hex());
+        if (const conf::Json *e = dm.find("end")) CHECK(end == e->u());
+    }
+
+    // K = 8 groups span 8192 bits, so 3000 draws from just before a group cross every boundary.
+    for (uint64_t pos : {8192ull - 100, 3ull * 8192 + 4000}) {
+        const size_t n = 3000;
+        dev<uint32_t> a32(n);
+        dev<uint64_t> a64(n);
+        dev<float> af32(n);
+        dev<double> af64(n);
+        at_kernel<<<12, 256>>>(KEY1234[0], KEY1234[1], KEY1234[2], KEY1234[3], pos, 8, a32.p, a64.p,
+                               af32.p, af64.p, n);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CHECK(a32.host() == device_fill<uint32_t>(KEY1234, pos, 8, n));
+        CHECK(a64.host() == device_fill<uint64_t>(KEY1234, pos, 8, n));
+        CHECK(af32.host() == device_fill<float>(KEY1234, pos, 8, n));
+        CHECK(af64.host() == device_fill<double>(KEY1234, pos, 8, n));
+    }
+    dev<uint64_t> top(2);
+    top_kernel<<<1, 1>>>(KEY1234[0], KEY1234[1], KEY1234[2], KEY1234[3], top.p);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<uint64_t> t = top.host(), want = device_fill<uint64_t>(KEY1234, ((uint64_t)1 << 63) - 64, 32, 2);
+    CHECK(t[0] == want[1] && t[1] == ((uint64_t)1 << 63) + 64);
+}
+
 int main(int argc, char **argv) {
-    const char *dir = argc > 1 ? argv[1] : "tests/data";
+    const char *dir = argc > 1 ? argv[1] : "tests/conformance";
     test_vectors();
-    test_dumps(dir);
+    test_conformance_fills(dir);
+    test_conformance_below(dir);
+    test_conformance_hashes(dir);
     test_against_c();
     test_signed();
     test_device_api();
     test_below();
     test_below_low();
-    test_cross_below();
     test_cut_below();
     test_normal();
     test_radius_sqrt_all();
     test_normal64();
     test_normal64_octets();
-    test_normal_reference();
     test_cut_normal();
     test_normal_streams();
     test_normal_capture();
-    test_cross_normal();
     test_exponential();
-    test_cross_exponential();
     test_choice();
     test_generator();
     test_empty_fills();

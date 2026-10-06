@@ -26,28 +26,28 @@ FMAFLAGS := $(if $(filter x86_64 amd64,$(shell uname -m)),-mavx2 -mfma,)
 NVCC_LIB := $(dir $(realpath $(shell command -v $(NVCC))))../lib
 LINK ?= -Xlinker -rpath,$(NVCC_LIB)
 
-.PHONY: build test reject thrust hostvec bench stats clangcuda host vectors tables cross clean
+.PHONY: build test reject thrust hostvec bench stats clangcuda host vectors tables clean
 
 build: tests/test_cuda tests/test_thrust tools/bench
 
 tandem_c.o: $(TANDEM_C)/tandem.c $(TANDEM_C)/tandem.h
 	$(CC) -std=c99 -O2 -ffp-contract=off $(FMAFLAGS) -c -o $@ $<
 
-tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h $(TANDEM_C)/tests/cross_normal.h $(TANDEM_C)/tests/cross_exponential.h $(HEADERS) tandem_c.o
+tests/test_cuda: tests/test_cuda.cu tests/vectors.h tests/conformance.h $(HEADERS) tandem_c.o
 	$(NVCC) $(NVCCFLAGS) -Iinclude -I$(TANDEM_C) -o $@ tests/test_cuda.cu tandem_c.o $(LINK)
 
-tests/test_thrust: tests/test_thrust.cu tandem_thrust.cuh $(HEADERS)
+tests/test_thrust: tests/test_thrust.cu tandem_thrust.cuh tests/conformance.h $(HEADERS)
 	$(NVCC) $(NVCCFLAGS) -Iinclude -o $@ tests/test_thrust.cu $(LINK)
 
 thrust: tests/test_thrust
-	./tests/test_thrust tests/data
+	./tests/test_thrust tests/conformance
 
 tools/bench: tools/bench.cu $(HEADERS)
 	$(NVCC) $(NVCCFLAGS) -Iinclude -o $@ tools/bench.cu -lcurand $(LINK)
 
 test: tests/test_cuda tests/test_thrust
-	./tests/test_cuda tests/data
-	./tests/test_thrust tests/data
+	./tests/test_cuda tests/conformance
+	./tests/test_thrust tests/conformance
 
 # A negative compile test: the probe must fail on the widened store's static_assert alone, and
 # its CONTROL variant must compile.
@@ -69,18 +69,18 @@ stats: tools/normal_stats
 # conda environment's by default. Only the tests are built, with the same sources as nvcc.
 CUDA_PATH ?= $(CONDA_PREFIX)
 CLANGCUDA_STD ?= c++20
-tests/test_clangcuda: tests/test_cuda.cu tests/vectors.h tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h $(TANDEM_C)/tests/cross_normal.h $(TANDEM_C)/tests/cross_exponential.h $(HEADERS) tandem_c.o
+tests/test_clangcuda: tests/test_cuda.cu tests/vectors.h tests/conformance.h $(HEADERS) tandem_c.o
 	$(HOSTCXX) --cuda-path=$(CUDA_PATH) -Wno-unknown-cuda-version -isystem $(CUDA_PATH)/targets/x86_64-linux/include \
 	  --cuda-gpu-arch=sm_80 -std=$(CLANGCUDA_STD) -O3 -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ \
 	  -x cuda tests/test_cuda.cu -x none tandem_c.o -L$(CUDA_PATH)/lib -L$(CUDA_PATH)/targets/x86_64-linux/lib \
 	  -lcudart -Wl,-rpath,$(CUDA_PATH)/lib -Wl,-rpath,$(CUDA_PATH)/targets/x86_64-linux/lib
 
 clangcuda: tests/test_clangcuda
-	./tests/test_clangcuda tests/data
+	./tests/test_clangcuda tests/conformance
 
 # core.hpp must stay valid C++17 for its other consumers, so this build pins the standard. The
-# test checks that the normals hash to tandem-c's tests/test_normal_bits.c value.
-tests/host_core: tests/host_core.cpp $(HEADERS) tests/cross_fill_below.h tests/cross_fill_normal.h tests/cross_fill_exponential.h $(TANDEM_C)/tests/cross_choice.h tandem_c.o
+# test reads the spec's conformance cases from tests/conformance.
+tests/host_core: tests/host_core.cpp tests/conformance.h $(HEADERS) tandem_c.o
 	$(CXX_HOST) -std=c++17 -O2 $(FMAFLAGS) -Wall -Wextra -Iinclude -I$(TANDEM_C) -o $@ tests/host_core.cpp tandem_c.o
 
 host: tests/host_core
@@ -99,14 +99,5 @@ vectors:
 tables:
 	python3 tools/gen_normal_tables.py $(SPEC_TABLES) > include/tandem/normal_tables.hpp
 
-# Regenerate the fill fixtures from core.hpp alone, on any host compiler.
-cross:
-	$(CXX_HOST) -std=c++17 -O1 -Iinclude -o tools/gen_cross_fill_below tools/gen_cross_fill_below.cpp
-	./tools/gen_cross_fill_below > tests/cross_fill_below.h
-	$(CXX_HOST) -std=c++17 -O1 -Iinclude -o tools/gen_cross_fill_normal tools/gen_cross_fill_normal.cpp
-	./tools/gen_cross_fill_normal > tests/cross_fill_normal.h
-	$(CXX_HOST) -std=c++17 -O1 -Iinclude -o tools/gen_cross_fill_exponential tools/gen_cross_fill_exponential.cpp
-	./tools/gen_cross_fill_exponential > tests/cross_fill_exponential.h
-
 clean:
-	rm -f tandem_c.o tests/test_clangcuda tests/test_thrust tests/test_cuda tests/host_core tools/bench tools/normal_stats tools/gen_cross_fill_below tools/gen_cross_fill_normal tools/gen_cross_fill_exponential
+	rm -f tandem_c.o tests/test_clangcuda tests/test_thrust tests/test_cuda tests/host_core tools/bench tools/normal_stats
