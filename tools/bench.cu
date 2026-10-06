@@ -1,4 +1,4 @@
-// Throughput of the device fills into device memory, next to cuRAND Philox4x32-10.
+// Throughput of the device fills into device memory, and of cuRAND Philox4x32-10 for each output type.
 // Each row first runs its own fill for WARM_MS, so the card reaches that fill's steady clocks and
 // power whatever ran before, then reports the median and the fastest of 21 cudaEvent timings.
 // docs/speed.md gives the median: the fastest once hid a slow allocation in most calls. A row run
@@ -13,11 +13,29 @@
 #include <vector>
 
 #include <curand.h>
+/* The device API header defines unused static functions. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wunused-but-set-parameter"
+#include <curand_kernel.h>
+#pragma GCC diagnostic pop
 
 #include <thrust/device_ptr.h>
 #include <thrust/transform.h>
 
 #include "../tandem_thrust.cuh"
+
+/* cuRAND's documented per-element idiom for Thrust: seed a Philox state at subsequence i. */
+template <class T> struct curand_at {
+    unsigned long long seed;
+    __device__ T operator()(uint64_t i) const {
+        curandStatePhilox4_32_10_t s;
+        curand_init(seed, i, 0, &s);
+        if constexpr (std::is_same<T, uint32_t>::value) return curand(&s);
+        else return curand_uniform_double(&s);
+    }
+};
 
 #define CUDA_CHECK(call)                                                                           \
     do {                                                                                           \
@@ -145,16 +163,52 @@ int main(int argc, char **argv) {
     row("tandem fill_exponential_f32", N * 4, [&] { tandem::fill_exponential_f32(key, 0, 32, f32, N); });
     row("tandem fill_exponential_f64", N * 8, [&] { tandem::fill_exponential_f64(key, 0, 32, f64, N); });
 
+    /* cuRAND Philox4x32-10 with the host API, one row per output type of the rows above. Integer
+     * types other than 32-bit come from curandGenerate into the same bytes: cuRAND has no 64-bit
+     * output for Philox and no 8- or 16-bit output. An offset moves the normals' start draw. */
+    int version = 0;
+    curandGetVersion(&version);
+    std::printf("cuRAND %d\n", version);
     curandGenerator_t g;
     curandCreateGenerator(&g, CURAND_RNG_PSEUDO_PHILOX4_32_10);
     curandSetPseudoRandomGeneratorSeed(g, 42);
-    row("cuRAND Philox4x32-10 u32", N * 4, [&] { curandGenerate(g, u32, N); });
-    row("cuRAND Philox4x32-10 f32", N * 4, [&] { curandGenerateUniform(g, f32, N); });
-    row("cuRAND Philox4x32-10 f64", N * 8, [&] { curandGenerateUniformDouble(g, f64, N); });
-    row("cuRAND Philox4x32-10 normal f32", N * 4, [&] { curandGenerateNormal(g, f32, N, 0.f, 1.f); });
-    row("cuRAND Philox4x32-10 normal f64", N * 8,
-        [&] { curandGenerateNormalDouble(g, f64, N, 0., 1.); });
+    row("cuRAND curandGenerate u32", N * 4, [&] { curandGenerate(g, u32, N); });
+    row("cuRAND curandGenerate as u64", N * 8, [&] { curandGenerate(g, u32, 2 * N); });
+    row("cuRAND curandGenerate as u16", N * 2, [&] { curandGenerate(g, u32, N / 2); });
+    row("cuRAND curandGenerate as u8", N, [&] { curandGenerate(g, u32, N / 4); });
+    row("cuRAND curandGenerateUniform", N * 4, [&] { curandGenerateUniform(g, f32, N); });
+    row("cuRAND curandGenerateUniformDouble", N * 8, [&] { curandGenerateUniformDouble(g, f64, N); });
+    row("cuRAND curandGenerateNormal", N * 4, [&] { curandGenerateNormal(g, f32, N, 0.f, 1.f); });
+    for (uint64_t off : {0, 1, 3}) {
+        char name[64];
+        std::snprintf(name, sizeof name, "cuRAND curandGenerateNormalDouble, offset %llu",
+                      (unsigned long long)off);
+        row(name, N * 8, [&] {
+            curandSetGeneratorOffset(g, off);
+            curandGenerateNormalDouble(g, f64, N, 0., 1.);
+        });
+    }
+    for (int lg : {24, 20})
+        for (uint64_t off : {0, 1}) {
+            size_t m = (size_t)1 << lg;
+            char name[64];
+            std::snprintf(name, sizeof name, "cuRAND curandGenerateNormalDouble, 2^%d, offset %llu",
+                          lg, (unsigned long long)off);
+            row(name, m * 8, [&] {
+                curandSetGeneratorOffset(g, off);
+                curandGenerateNormalDouble(g, f64, m, 0., 1.);
+            });
+        }
     curandDestroyGenerator(g);
+    {
+        auto idx0 = thrust::counting_iterator<uint64_t>(0), idx1 = thrust::counting_iterator<uint64_t>(N);
+        row("cuRAND thrust::transform curand", N * 4, [&] {
+            thrust::transform(idx0, idx1, thrust::device_pointer_cast(u32), curand_at<uint32_t>{42});
+        });
+        row("cuRAND thrust::transform curand_uniform_double", N * 8, [&] {
+            thrust::transform(idx0, idx1, thrust::device_pointer_cast(f64), curand_at<double>{42});
+        });
+    }
     CUDA_CHECK(cudaFree(buf));
     return 0;
 }
