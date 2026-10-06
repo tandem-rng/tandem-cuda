@@ -89,7 +89,8 @@ __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float
   `choice(table)`, `child`, `split`, `sub` and `fork`. Bounded draws, normals, exponentials and
   weighted choice are not part of the specification. `tandem::Rng::set_position(p)` and
   `from_key` reject a start `p >= 2^63`: `set_position` returns false and keeps the state, and
-  `from_key` keeps position 0.
+  `from_key` keeps position 0. `advance_to(p)` moves to the end of draws or a fill made from the
+  generator without the check, since an end may lie at or past 2^63.
   They match `tandem_u32_below`, `tandem_u64_below`, `tandem_normal_f64` and
   `tandem_exponential_f64` and `_f32` and `tandem_choice` of the C library.
 - `tandem_thrust.cuh`: Thrust and CUB adapters. `tandem::uniform<T>` (u32, u64, f32, f64),
