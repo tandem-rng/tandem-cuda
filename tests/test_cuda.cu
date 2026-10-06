@@ -1051,10 +1051,45 @@ static void check_exponential(std::mt19937_64 &gen, const char *label) {
     }
 }
 
+__global__ void exponential_f32_kernel(float *out) {
+    uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    out[k] = tandem::exponential_f32(tandem::to_f32(k << 8));
+}
+
+// The f32 map of spec Appendix A as tandem-c writes it. The device's division without its range
+// check and the folded powers of two must give its bits for every one of the 2^24 Float32 draws,
+// on the device and on the host.
+static void test_exponential_f32_all() {
+    const uint32_t n = 1u << 24;
+    dev<float> d(n);
+    exponential_f32_kernel<<<n / 256, 256>>>(d.p);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> got = d.host();
+    uint32_t bad_dev = 0, bad_host = 0;
+    for (uint32_t k = 0; k < n; k++) {
+        float x = 1.0f - tandem::to_f32(k << 8), m, nk;
+        uint32_t ix;
+        std::memcpy(&ix, &x, 4);
+        ix += 0x004afb0du;
+        nk = (float)(127 - (int32_t)(ix >> 23));
+        ix = (ix & 0x007fffffu) + 0x3f3504f3u;
+        std::memcpy(&m, &ix, 4);
+        float s = (m - 1.0f) / (m + 1.0f), zz = s * s;
+        float p = std::fma(zz, std::fma(zz, std::fma(zz, 0.14275366f, 0.20000061f), 0.33333334f), 1.0f);
+        float want = 0.5f * std::fma(nk, 2.857213530660374e-06f, std::fma(nk, 1.38629150390625f, (s * -4.0f) * p));
+        bad_dev += std::memcmp(&got[k], &want, 4) != 0;
+        float host = tandem::exponential_f32(tandem::to_f32(k << 8));
+        bad_host += std::memcmp(&host, &want, 4) != 0;
+    }
+    CHECK(bad_dev == 0);
+    CHECK(bad_host == 0);
+}
+
 static void test_exponential() {
     std::mt19937_64 gen(2718);
     check_exponential<double, tandem_fill_exponential_f64, 64, tandem::fill_exponential_f64>(gen, "f64");
     check_exponential<float, tandem_fill_exponential_f32, 32, tandem::fill_exponential_f32>(gen, "f32");
+    test_exponential_f32_all();
 }
 
 // The exponential fixtures of this repository and of tandem-c, bit for bit on the device.

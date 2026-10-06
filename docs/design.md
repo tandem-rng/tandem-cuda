@@ -141,15 +141,38 @@ reference logarithm and the logarithm of the f32 Box-Muller step on hosts and de
 call, every multiply-add
 an explicit `std::fma`, and no plain product feeding a plain sum. Device contraction therefore
 cannot change the bits, and every host and device returns tandem-c's values, which the tests check
-byte for byte. Building device code with `-use_fast_math` or `-prec-div=false` changes the
+byte for byte. Building device code with `-use_fast_math` or `-prec-div=false` changes the f64
 division and breaks that. The maximum error is 1.1e-15 relative in f64 and 2.8e-7 in f32. The
 fills run the direct kernel, because the map makes them compute bound and the tile kernel's
 separate write phase lost 7 to 13 % on the A100. `tests/cross_fill_exponential.h` holds fixtures
 for ports at five start positions, unaligned ones included.
+
+The reference logarithm multiplies by -4 and halves the result. `neg_log_f64` and
+`exponential_f32` move those powers of two into the operands instead: the numerator `2 - 2m`
+gives `t = -2s`, the polynomial runs on `t^2` with each coefficient of `s^(2j)` divided by `4^j`,
+and the `ln 2` terms are halved. A power of two commutes with rounding while no value is
+subnormal, so each operation rounds to the reference's value times that power of two, and the
+result has the reference's bits with two multiplications fewer. On a device the f32 division is
+the fast path of the IEEE division without its range check and slow path, which only inputs
+outside `[1, 4)` or near the float range's ends need. `tests/test_cuda.cu` compares the f32 map
+with tandem-c's arithmetic for all 2^24 Float32 draws, on the device and on the host. On the A100
+the f32 fill went from 1023 to 1150 GiB/s and the f64 fill from 909 to 935 to 931 to 955. The
+f64 division keeps its check: the same steps with `rcp.approx.ftz.f64` as the seed differed from
+`div.rn.f64` in 0.2 % of 2^34 test inputs.
 
 Every fill reaches the A100's 250 W power cap when it runs for long. A bench that times the
 fastest of a few calls after a shared warm-up then measures the power the previous rows left.
 The f32 exponential row read 1022 GiB/s after the f64 Box-Muller rows, 1315 after the ziggurat
 rows that replaced them in commit 0ff5f18, and 1140 alone, with the same machine code. So
 `tools/bench` runs each fill for two seconds before it times that fill, and takes the median.
-The f32 exponential row then reads 1019 to 1036 alone and in the table.
+The f32 exponential row then read 1019 to 1036 alone and in the table, before the folded
+arithmetic above.
+
+At the power cap the SM clock depends on the work per byte. The uniform tile fills run at 1170
+to 1215 MHz and the direct ones at 1260, bound by memory. The f32 normal and the exponentials run
+at 1035 to 1050 MHz and the f64 normal at about 1100, bound by their arithmetic at that clock.
+The f64 exponential spends about 22 f64 operations per element, eight of them in the division,
+on 32 f64 lanes per SM. The f64 normal's table pass runs at 1270 GiB/s, and its misses kernel
+takes 0.3 ms of the 1.9 ms of a 2^28 fill. Each miss seeds two child keys and its fallback chunk,
+three runs of F, before its wedge test. A table in shared memory, the misses kernel at four
+blocks per SM, and the fallback's `sub` key computed once on the host gained nothing there.

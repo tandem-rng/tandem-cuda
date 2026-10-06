@@ -39,8 +39,10 @@ matches exactly in f64 and to the same tolerance in f32. An empty f64 normal fil
 position to 64 bits, the f32 one leaves it alone. Exponential fills equal tandem-c's
 `tandem_fill_exponential_f64` and `_f32` byte for byte at random keys, `K`, start slots and
 lengths up to 2^22, and match `tests/cross_fill_exponential.h` and tandem-c's
-`tests/cross_exponential.h` exactly. The device generator's `exponential()` and `exponentialf()`
-equal the C library's scalar draws. A generator is checked by running mixed fills of every width through it and through the C
+`tests/cross_exponential.h` exactly. The f32 map equals tandem-c's arithmetic for all 2^24
+Float32 draws on the device and on the host, which covers the device division without its range
+check. The device generator's `exponential()` and `exponentialf()` equal the C library's scalar
+draws. A generator is checked by running mixed fills of every width through it and through the C
 generator, which must agree in values and in the final position. The fill comparison covers u8, u16, u32, u64, f16 bits,
 f32, f64 and bool. The signed fills are compared with the C unsigned fills and their
 returned positions. `tests/host_core.cpp` (`make host`) builds `core.hpp` as C++17 with clang and
