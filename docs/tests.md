@@ -24,20 +24,21 @@ f420545's. The device runs the fills and the
 | Checklist section | Host | Device |
 |---|---|---|
 | Fallback by global draw index | every `fill_below.json` and `normal.json` case, the shifted-start pairs | the same through the fills |
-| Width from range | `urand` and `urand64` at range 1000 and 0 | a 32-bit range into `uint64_t` elements, the u64 fill |
+| Width from range | `urand`, `urand64` and `below` at range 1000 and 0, `below` at 2^32 and 2^32 + 1 | `device_rng::below`, `below<uint64_t>` of Thrust and a 32-bit range into `uint64_t` elements give `CROSS_BELOW32[3]`, the u64 fill `CROSS_BELOW64[3]` |
 | n = 0 | (fills are device only) | the seven empty cases, nothing written |
 | Odd n | `CROSS_NORMAL32[0..4]` and their ends | the same |
 | Pair rule for Float32 Box-Muller | `CROSS_NORMALF`, the pair shift, `normalf` | the same, with `device_rng` |
 | Weighted choice | tables of the vectors cases, every case, the shift, `m = 1`, invalid weights | every case, the shift, the empty fill |
 | Cut fill | (scalar draws equal the fills) | every case cut at 1, 7, 20, 21 and `n - 1`, f32 normals at 2, 8, 20 and the largest even element below `n` |
-| Block and 2^63 position boundaries | stream hashes, all five dumps, random access, `set_position` and `from_key` bounds, a draw at 2^63 - 1 | stream hashes from fills and draws, normal and exponential dumps, random access, a draw at 2^63 - 1 |
+| Block and 2^63 position boundaries | stream hashes, all five dumps, random access, `set_position` and `from_key` bounds, a draw at 2^63 - 1, `fill_end` | stream hashes from fills and draws, normal and exponential dumps, random access, a draw at 2^63 - 1, every fill to an end of 2^64 |
 
 The device's Float32 normals are not bit exact, so the Float32 normal dump is a host check.
 This library has no UInt128, Char or complex fills, so their stream hashes and the complex block
-boundary are not checked, and
-its fills have no error channel, so a fill whose end reaches 2^64 is not rejected, although the
-API can express that length. `device_rng` and `generator` take any start, so the start bounds are
-checked on `Rng` alone.
+boundary are not checked. `device_rng` and `generator` take any start, so the start bounds are
+checked on `Rng` alone. Every fill whose end reaches 2^64 throws `std::length_error` before it
+launches: the device test runs each fill through a generator to an end of exactly 2^64 and checks
+that the output and the position are untouched, and that one element less fills. The host test
+checks `fill_end`, the check every entry point calls.
 
 ## Suite
 

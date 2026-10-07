@@ -74,6 +74,10 @@ __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float
   `m` cut and `m` alias entries and returns false for invalid weights, then copy the two arrays to
   the device and point `table.cut` and `table.alias` at the copies. `tandem::choice_of(table, r)`
   maps one draw on hosts and devices. Appendix C of the specification.
+- Every fill, free or through `tandem::generator`, checks its end `align(pos, w) + w n` on the
+  host before it launches. Where the end reaches 2^64 it throws `std::length_error`, writes
+  nothing and leaves the generator's position unchanged. `tandem::fill_end` in `core.hpp` is
+  that check, for other host entry points.
 - `tandem::generator`: a host handle with public `key`, `pos` and `K`, built by `from_key` or
   `seed`. Its `fill_*` methods (every fill above, with the range first for the bounded ones) take
   the output pointer, `n` and a stream, fill from `pos`, and set `pos` to the position the
@@ -83,7 +87,9 @@ __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float
   registers. `from_key`, `seed`, `skip_to`, `next_bool/u8/u16/u32/u64/f16_bits/f32/f64`. Its
   draws follow the specification's scalar rule for the same key and position, mixed widths
   included. The rest of the draw API is `tandem::Rng`'s, shared through `Draws<D>` in
-  `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, `normal()`
+  `core.hpp`: bounded draws `urand(range)` and `urand64(range)` by Lemire's method, and
+  `below(range)`, which names only the result type and so draws 32 bits for `range <= 2^32` and
+  64 bits above, as Appendix A requires, `normal()`
   (one ziggurat draw) and `normal2()` (two), `normalf()`/`normalf2()` by Box-Muller in float
   from two f32 uniforms, `exponential()` and `exponentialf()`, `at_urand/urand64/frand/drand(i)`,
   `choice(table)`, `child`, `split`, `sub` and `fork`. Bounded draws, normals, exponentials and
@@ -94,7 +100,8 @@ __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float
   They match `tandem_u32_below`, `tandem_u64_below`, `tandem_normal_f64` and
   `tandem_exponential_f64` and `_f32` and `tandem_choice` of the C library.
 - `tandem_thrust.cuh`: Thrust and CUB adapters. `tandem::uniform<T>` (u32, u64, f32, f64),
-  `tandem::below<T>` (u32, u64) and `tandem::normal<T>` (f32, f64) are functors from an index `i`
+  `tandem::below<T>` (u32, u64; `below<uint64_t>` takes its draw width from the range, 32 bits
+  for `range <= 2^32`) and `tandem::normal<T>` (f32, f64) are functors from an index `i`
   to element `i` of the fill of the same type, built on the device generator's random access.
   `tandem::make_iterator(f, first)` wraps one in a `transform_iterator` over a
   `counting_iterator`, for `thrust::reduce`, `thrust::copy_n`, `thrust::transform` and CUB. A
