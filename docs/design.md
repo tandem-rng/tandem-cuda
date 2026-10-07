@@ -159,9 +159,9 @@ division keeps its check: the same steps with `rcp.approx.ftz.f64` as the seed d
 contracted `num * rcp` would feed the unrounded product to the two-sum. On a device `1 / d` is the
 fast path of the IEEE division without its range check and slow path, which only inputs outside
 `[1, 4)` or near the float range's ends need. `tests/test_cuda.cu` compares the f32 map with
-tandem-c's arithmetic for all 2^24 Float32 draws, on the device and on the host. The earlier
-single-float map ran the f32 fill at 1150 GiB/s on the A100, and this map adds 10 f32 operations
-per draw.
+tandem-c's arithmetic for all 2^24 Float32 draws, on the device and on the host. This map adds
+10 f32 operations per draw to the single-float one before it, and the A100 runs the f32 fill at
+926 GiB/s, see [speed](speed.md).
 
 Every fill reaches the A100's 250 W power cap when it runs for long. A bench that times the
 fastest of a few calls after a shared warm-up then measures the power the previous rows left.
