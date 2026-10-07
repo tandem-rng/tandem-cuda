@@ -70,14 +70,14 @@ jobs:
       - if: matrix.cc == 'clang'
         run: make hostvec TANDEM_C=tandem-c HOSTCC=clang HOSTCXX=clang++
   conformance:
-    name: conformance JSON equals tandem-spec f420545
+    name: conformance JSON equals tandem-spec 2a4bd08
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
         with:
           repository: tandem-rng/spec
-          ref: f4205457e1e2ed19e655e36820015d7bdcf037dd
+          ref: 2a4bd08205596bc12bb7ae102862c97a0477dc2e
           path: spec
       - run: |
           diff <(cd tests/conformance && ls) <(cd spec/conformance && ls *.json)
