@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <random>
 #include <string>
@@ -1131,7 +1132,7 @@ static void test_signed() {
 // ---- Conformance cases of the spec ---------------------------------------------------------------
 
 // The scalar draws of the conformance kinds on a device_rng, as bit patterns, and its end position.
-enum class Draw { below32, below64, normal64, normal32, exp64, exp32, choice };
+enum class Draw { below32, below64, below_any, normal64, normal32, exp64, exp32, choice };
 
 __global__ void scalar_kernel(Draw kind, uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3,
                               uint64_t pos, uint32_t K, uint64_t range, tandem::ChoiceTable t,
@@ -1142,6 +1143,7 @@ __global__ void scalar_kernel(Draw kind, uint32_t k0, uint32_t k1, uint32_t k2, 
         switch (kind) {
         case Draw::below32: out[i] = r.urand((uint32_t)range); break;
         case Draw::below64: out[i] = r.urand64(range); break;
+        case Draw::below_any: out[i] = r.below(range); break;
         case Draw::normal64: out[i] = (uint64_t)__double_as_longlong(r.normal()); break;
         case Draw::normal32:
             if (i + 1 < n) {
@@ -1314,6 +1316,72 @@ static void test_conformance_below(const char *dir) {
     CHECK(tandem::fill_u32_below(b32.key, 0, 32, 1000u, (uint64_t)0, d.p, 64) == 64 * 32);
     CUDA_CHECK(cudaDeviceSynchronize());
     CHECK(b32.range == 1000 && d.host() == b32.values);
+    // device_rng::below names only the result type and draws 32 bits at range 1000.
+    uint64_t end;
+    CHECK(device_scalars(Draw::below_any, b32, tandem::ChoiceTable{}, end) == b32.values && end == 64 * 32);
+}
+
+// Every host fill entry point checks the end align(p, w) + w n before it launches: where it reaches
+// 2^64 the fill throws std::length_error, writes nothing, and a generator keeps its position. One
+// element less ends below 2^64 and fills.
+static void test_fill_end() {
+    const uint64_t top = ~(uint64_t)0;
+    DeviceChoice tb({1, 2});
+    dev<uint64_t> d(8);
+    struct Fill {
+        const char *name;
+        unsigned w; // bits consumed per element, two Float32 draws per normal pair
+        std::function<void(tandem::generator &, void *, size_t)> run;
+    };
+    const Fill fills[] = {
+        {"u32", 32, [](tandem::generator &g, void *o, size_t n) { g.fill_u32(static_cast<uint32_t *>(o), n); }},
+        {"u64", 64, [](tandem::generator &g, void *o, size_t n) { g.fill_u64(static_cast<uint64_t *>(o), n); }},
+        {"f32", 32, [](tandem::generator &g, void *o, size_t n) { g.fill_f32(static_cast<float *>(o), n); }},
+        {"f64", 64, [](tandem::generator &g, void *o, size_t n) { g.fill_f64(static_cast<double *>(o), n); }},
+        {"bool", 1, [](tandem::generator &g, void *o, size_t n) { g.fill_bool(static_cast<bool *>(o), n); }},
+        {"u8", 8, [](tandem::generator &g, void *o, size_t n) { g.fill_u8(static_cast<uint8_t *>(o), n); }},
+        {"u16", 16, [](tandem::generator &g, void *o, size_t n) { g.fill_u16(static_cast<uint16_t *>(o), n); }},
+        {"f16", 16, [](tandem::generator &g, void *o, size_t n) { g.fill_f16_bits(static_cast<uint16_t *>(o), n); }},
+        {"i64", 64, [](tandem::generator &g, void *o, size_t n) { g.fill_i64(static_cast<int64_t *>(o), n); }},
+        {"below32", 32, [](tandem::generator &g, void *o, size_t n) { g.fill_u32_below(6, static_cast<uint32_t *>(o), n); }},
+        {"below32->i64", 32, [](tandem::generator &g, void *o, size_t n) { g.fill_u32_below(6u, (int64_t)-3, static_cast<int64_t *>(o), n); }},
+        {"below64", 64, [](tandem::generator &g, void *o, size_t n) { g.fill_u64_below(6, static_cast<uint64_t *>(o), n); }},
+        {"normal64", 64, [](tandem::generator &g, void *o, size_t n) { g.fill_normal_f64(static_cast<double *>(o), n); }},
+        {"normal32", 32, [](tandem::generator &g, void *o, size_t n) { g.fill_normal_f32(static_cast<float *>(o), n); }},
+        {"exp64", 64, [](tandem::generator &g, void *o, size_t n) { g.fill_exponential_f64(static_cast<double *>(o), n); }},
+        {"exp32", 32, [](tandem::generator &g, void *o, size_t n) { g.fill_exponential_f32(static_cast<float *>(o), n); }},
+        {"choice", 64, [&](tandem::generator &g, void *o, size_t n) { g.fill_choice(tb.t, static_cast<uint32_t *>(o), n); }},
+    };
+    for (const auto &f : fills) {
+        // Four elements end exactly at 2^64 from an aligned start, four Float32 normals at 2^64 too.
+        const uint64_t start = top - 4 * f.w + 1;
+        tandem::generator g = tandem::generator::from_key(KEY1234, start, 32);
+        CUDA_CHECK(cudaMemset(d.p, 0xab, 64));
+        bool thrown = false;
+        try {
+            f.run(g, d.p, 4);
+        } catch (const std::length_error &) {
+            thrown = true;
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+        bool untouched = true;
+        for (uint64_t v : d.host()) untouched &= v == 0xababababababababull;
+        if (!thrown || !untouched || g.pos != start) {
+            std::printf("FAIL %s fill to 2^64: thrown %d, output untouched %d\n", f.name, thrown, untouched);
+            failures++;
+        }
+        f.run(g, d.p, 2); // ends below 2^64
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CHECK(g.pos == top - 2 * f.w + 1);
+    }
+    // An aligning fill whose start aligns to 2^64 throws even when empty.
+    bool thrown = false;
+    try {
+        tandem::fill_u64(KEY1234, top - 1, 32, d.p, 0);
+    } catch (const std::length_error &) {
+        thrown = true;
+    }
+    CHECK(thrown);
 }
 
 __global__ void at_kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, uint64_t pos,
@@ -1440,6 +1508,7 @@ int main(int argc, char **argv) {
     test_conformance_fills(dir);
     test_conformance_below(dir);
     test_conformance_hashes(dir);
+    test_fill_end();
     test_against_c();
     test_signed();
     test_device_api();

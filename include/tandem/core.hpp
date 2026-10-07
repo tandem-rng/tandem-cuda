@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 
 #include "normal_tables.hpp"
 
@@ -99,6 +100,16 @@ TANDEM_FN void block(const uint32_t key[4], uint64_t c, uint32_t j, uint32_t out
 
 TANDEM_FN uint64_t align_pos(uint64_t pos, unsigned w) {
     return (pos + w - 1u) & ~((uint64_t)w - 1u);
+}
+
+/* The end align(pos, a) + w units of a fill, for host entry points to check before they launch or
+ * write: the spec requires the end below 2^64, so a fill that reaches it throws std::length_error.
+ * Host only. */
+inline uint64_t fill_end(uint64_t pos, unsigned a, unsigned w, uint64_t units) {
+    const uint64_t top = ~(uint64_t)0;
+    if (pos > top - (a - 1u) || units > (top - align_pos(pos, a)) / w)
+        throw std::length_error("tandem: the fill's end reaches 2^64");
+    return align_pos(pos, a) + w * units;
 }
 
 TANDEM_FN unsigned log2k(uint32_t K) {
@@ -671,6 +682,12 @@ template <class D> class Draws {
         }
         return mulhi64(x, range);
     }
+    /* A bounded draw whose width comes from the range, for interfaces that name only the result
+     * type: 32 bits for range <= 2^32, else 64 (spec Appendix A). Range 2^32 returns the draw. */
+    TANDEM_FN uint64_t below(uint64_t range) {
+        if (range >> 32 == 0) return urand((uint32_t)range);
+        return range == (uint64_t)1 << 32 ? urand() : urand64(range);
+    }
     TANDEM_FN uint32_t urand(uint32_t start, uint32_t end) { return start + urand(end - start); }
     TANDEM_FN uint64_t urand64(uint64_t start, uint64_t end) {
         return start + urand64(end - start);
@@ -977,6 +994,17 @@ TANDEM_FN uint64_t below_u64_t(uint64_t x, uint64_t range, uint64_t t, const uin
     if (x * range < t)
         return below_retry_u64(range, t, key, K, g);
     return mulhi64(x, range);
+}
+
+/* The draw width of a bounded fill whose interface names only the result type: 32 bits for
+ * range <= 2^32, else 64 (spec Appendix A). */
+TANDEM_FN unsigned below_width(uint64_t range) { return range <= (uint64_t)1 << 32 ? 32u : 64u; }
+
+/* below_u32_t for a range up to 2^32, with t the threshold of the range's low word. Range 2^32
+ * never rejects and returns the draw u. */
+TANDEM_FN uint32_t below_u32_wide(uint32_t u, uint64_t range, uint32_t t, const uint32_t key[4],
+                                  uint32_t K, uint64_t g) {
+    return range >> 32 ? u : below_u32_t(u, (uint32_t)range, t, key, K, g);
 }
 
 TANDEM_FN uint32_t below_u32(uint32_t u, uint32_t range, const uint32_t key[4], uint32_t K,

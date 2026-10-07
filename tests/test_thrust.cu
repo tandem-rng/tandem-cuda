@@ -97,9 +97,19 @@ static void test_against_fills() {
             auto fb = [&](uint32_t *p, size_t m) { tandem::fill_u32_below(key, pos, K, r, p, m); };
             CHECK((transformed<tandem::below<uint32_t>, uint32_t>(tandem::below<uint32_t>(key, r, K, pos), n) == filled<uint32_t>(fb, n)));
         }
-        for (uint64_t r : {6ull, 1000000007ull, 0xc000000000003039ull}) {
-            auto fb = [&](uint64_t *p, size_t m) { tandem::fill_u64_below(key, pos, K, r, p, m); };
-            CHECK((transformed<tandem::below<uint64_t>, uint64_t>(tandem::below<uint64_t>(key, r, K, pos), n) == filled<uint64_t>(fb, n)));
+        // below<uint64_t> names only the result type, so it draws 32 bits up to range 2^32, where
+        // the draw is the value, and 64 bits above.
+        for (uint64_t r : {6ull, 1000000007ull, 1ull << 32, (1ull << 32) + 1, 0xc000000000003039ull}) {
+            auto fb = [&](uint64_t *p, size_t m) {
+                if (r < (1ull << 32)) tandem::fill_u32_below(key, pos, K, (uint32_t)r, (uint64_t)0, p, m);
+                else if (r > (1ull << 32)) tandem::fill_u64_below(key, pos, K, r, p, m);
+            };
+            std::vector<uint64_t> want = filled<uint64_t>(fb, n);
+            if (r == (1ull << 32)) {
+                auto u = transformed<tandem::uniform<uint32_t>, uint32_t>(tandem::uniform<uint32_t>(key, K, pos), n);
+                want.assign(u.begin(), u.end());
+            }
+            CHECK((transformed<tandem::below<uint64_t>, uint64_t>(tandem::below<uint64_t>(key, r, K, pos), n) == want));
         }
 
         // Normals: iterator element 2j, 2j + 1 are the pair of uniforms 2j, 2j + 1.
@@ -143,9 +153,20 @@ static void test_iterators() {
     CHECK(std::equal(t.begin(), t.end(), h.begin() + 1000));
 }
 
+// Width from range: 64 elements of below<uint64_t> at range 1000 from the key of seed 42 at
+// position 0 are CROSS_BELOW32[3], not CROSS_BELOW64[3].
+static void test_width(const char *dir) {
+    const auto cs = conf::cases(dir, "fill_below.json");
+    const conf::Case &c = conf::find(cs, "CROSS_BELOW32[3]");
+    CHECK(c.range == 1000 && c.start == 0);
+    CHECK((transformed<tandem::below<uint64_t>, uint64_t>(tandem::below<uint64_t>(c.key, 1000, c.K, 0), 64) == c.values));
+    CHECK(conf::find(cs, "CROSS_BELOW64[3]").values != c.values);
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : "tests/conformance";
     test_streams(dir);
+    test_width(dir);
     test_against_fills();
     test_iterators();
     if (failures) {

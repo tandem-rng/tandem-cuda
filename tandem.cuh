@@ -808,7 +808,7 @@ constexpr size_t NORMAL_LIST_MIN = (size_t)1 << 16;
 inline uint64_t fill_normal_f64_impl(const uint32_t key[4], uint64_t pos, uint32_t K, double *out,
                                      size_t n, cudaStream_t stream) {
     K = K ? K : DEFAULT_K;
-    uint64_t p0 = align_pos(pos, 64);
+    uint64_t p0 = align_pos(pos, 64), p1 = fill_end(pos, 64, 64, n);
     if (n == 0) return p0;
     uint64_t d0 = p0 >> 6, ba = d0 >> 1, bb = (d0 + n - 1u) >> 1;
     uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K, chunks = 8u * (g1 - g0 + 1u);
@@ -837,7 +837,7 @@ inline uint64_t fill_normal_f64_impl(const uint32_t key[4], uint64_t pos, uint32
         (void)cudaGetLastError();
         fill_normal64_fused<<<blocks, THREADS, 0, stream>>>(key[0], key[1], key[2], key[3], K, g0,
                                                             d0, n, out);
-        return p0 + 64u * (uint64_t)n;
+        return p1;
     }
     auto count = static_cast<unsigned long long *>(scratch);
     auto list = reinterpret_cast<NormalMiss *>(static_cast<char *>(scratch) + 16);
@@ -869,7 +869,7 @@ inline uint64_t fill_normal_f64_impl(const uint32_t key[4], uint64_t pos, uint32
     } else {
         cudaFreeAsync(scratch, stream);
     }
-    return p0 + 64u * (uint64_t)n;
+    return p1;
 }
 
 /* The float Box-Muller step of the fill kernel. It is box_muller2_f32 with the angle through
@@ -954,8 +954,8 @@ inline uint64_t fill_normal_f32_impl(const uint32_t key[4], uint64_t pos, uint32
                                      float *out, size_t n, cudaStream_t stream) {
     K = K ? K : DEFAULT_K;
     if (n == 0) return pos;
-    uint64_t np = ((uint64_t)n + 1u) / 2u;
-    uint64_t p0 = align_pos(pos, 32), p1 = p0 + np * 64u;
+    uint64_t np = (uint64_t)n / 2u + (n & 1u);
+    uint64_t p0 = align_pos(pos, 32), p1 = fill_end(pos, 32, 64, np);
     uint64_t s0 = p0 >> 5, ba = s0 >> 2, bb = (s0 + 2u * np - 1u) >> 2;
     uint64_t g0 = (ba >> 3) / K, g1 = (bb >> 3) / K;
     unsigned blocks = (unsigned)((8u * (g1 - g0 + 1u) + THREADS - 1) / THREADS);
@@ -976,7 +976,7 @@ inline uint64_t fill(const uint32_t key[4], uint64_t pos, uint32_t K,
                      bool tile = true, Bound bd = Bound{}) {
     constexpr unsigned bits = elem<E>::bits;
     K = K ? K : DEFAULT_K;
-    uint64_t p0 = align_pos(pos, bits), p1 = p0 + (uint64_t)n * bits;
+    uint64_t p0 = align_pos(pos, bits), p1 = fill_end(pos, bits, bits, n);
     if (n == 0) return p1;
     uint64_t r0 = p0 >> 10, r1 = (p1 - 1) >> 10;
     uint64_t g0 = r0 / K, g1 = r1 / K;

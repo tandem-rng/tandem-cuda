@@ -72,6 +72,17 @@ static void test_fill_below(const char *dir) {
     uint64_t p = q.position();
     CHECK(q.urand(0u) == 0 && q.position() == p + 32);
     CHECK(q.urand64(0ull) == 0 && q.position() == p + 128);
+    // below(range) names only the result type: 32-bit draws up to range 2^32, where the value is
+    // the draw, and 64-bit draws above.
+    const uint64_t r32 = (uint64_t)1 << 32;
+    tandem::Rng v = at(b32);
+    for (size_t i = 0; i < 64; i++) CHECK(v.below(1000) == b32.values[i]);
+    tandem::Rng u = v;
+    p = v.position();
+    CHECK(v.below(0) == 0 && v.position() == p + 32);
+    CHECK(v.below(r32) == u.at_urand(1) && v.position() == p + 64);
+    u = v;
+    CHECK(v.below(r32 + 1) == u.urand64(r32 + 1) && v.position() == u.position());
     // The fallback is keyed by g, so a fill one draw later is the same fill shifted by one.
     const char *pairs[][2] = {{"CROSS_BELOW32_AT[4]", "CROSS_BELOW32[4]"},
                               {"CROSS_BELOW64_AT[6]", "CROSS_BELOW64[6]"}};
@@ -293,6 +304,25 @@ static void test_dumps(const conf::Json &hashes, FILE *dump) {
 
 // Start positions below 2^63 are accepted, 2^63 and above rejected without a change. A UInt64 draw
 // at 2^63 - 1 aligns to 2^63 and ends at 2^63 + 64.
+// A fill's end align(p, w) + w n must stay below 2^64. fill_end, which every host fill entry point
+// calls before it launches or writes, throws std::length_error where it reaches 2^64.
+static void test_fill_end() {
+    const uint64_t top = ~(uint64_t)0;
+    auto throws = [](uint64_t p, unsigned a, unsigned w, uint64_t n) {
+        try {
+            tandem::fill_end(p, a, w, n);
+        } catch (const std::length_error &) {
+            return true;
+        }
+        return false;
+    };
+    CHECK(tandem::fill_end(top - 191, 64, 64, 2) == top - 63);
+    CHECK(throws(top - 191, 64, 64, 3) && throws(top - 190, 64, 64, 3));
+    CHECK(tandem::fill_end(top - 1, 1, 1, 1) == top && throws(top - 1, 1, 1, 2));
+    CHECK(throws(top - 62, 64, 64, 0) && tandem::fill_end(top - 63, 64, 64, 0) == top - 63);
+    CHECK(throws(0, 32, 32, (uint64_t)1 << 59) && tandem::fill_end(0, 32, 32, ((uint64_t)1 << 59) - 1) == top - 31);
+}
+
 static void test_position_bounds() {
     const uint64_t top = (uint64_t)1 << 63;
     tandem::Rng q(42, 0, 32), before = q;
@@ -373,6 +403,7 @@ int main(int argc, char **argv) {
     test_choice(dir);
     test_streams(hashes);
     test_position_bounds();
+    test_fill_end();
     test_dumps(hashes, nullptr);
     std::printf("host core: %s\n", bad ? "FAIL" : "ok");
     return bad != 0;
