@@ -15,9 +15,9 @@ make reject                         # tests/reject_widened.cu must not compile
 ## Conformance
 
 `tests/conformance` holds byte-identical copies of the `conformance/*.json` files of tandem-spec
-at f420545, and a CI job compares them with the spec. `tests/conformance.h` reads them, and the
+at 2a4bd08, and a CI job compares them with the spec. `tests/conformance.h` reads them, and the
 tests check each item of the spec's `conformance/CHECKLIST.md` at b31af72, whose JSON files equal
-f420545's. The device runs the fills and the
+2a4bd08's. The device runs the fills and the
 `device_rng` draws, and the host (`tests/host_core.cpp`) computes each fill element from
 `core.hpp`'s per-element maps or from the scalar draws that equal it.
 
@@ -97,6 +97,6 @@ draws per 8 bytes and would leave half of each block unwritten. Its 32-bit contr
 ## CI
 
 GitHub runners have no GPU, so CI compiles the tests and the bench for `sm_80`, runs `make reject`
-and `make host`, compares `tests/conformance` with tandem-spec f420545, and checks
+and `make host`, compares `tests/conformance` with tandem-spec 2a4bd08, and checks
 that `tests/vectors.h` and `include/tandem/normal_tables.hpp` match the spec repository's
 `vectors.json` and `tables/normal_f64_zig1024.json`.

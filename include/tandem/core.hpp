@@ -551,15 +551,21 @@ TANDEM_FN float div_rn_unit(float n, float d) {
  * L(1 - u) / 2 with the reference logarithm, where 1 - u and the halving are exact. */
 TANDEM_FN double exponential_f64(double u) { return detail::neg_log_f64(1.0 - u); }
 
-/* The f32 logarithm with the factors folded in as in neg_log_f64. */
+/* tandem-c's neg_log_f32 of 1 - u, within 0.58 ulp of -ln(1 - u) for every u on the 2^-24 grid:
+ * u = (2 - 2m) / (m + 1) is carried as uh + r / d, and nk ln2_hi + uh is split by fast two-sum.
+ * The reciprocal is the device's IEEE division of 1 by d, and every product feeds an fma
+ * operand or is exact, so contraction cannot change the bits. */
 TANDEM_FN float exponential_f32(float u) {
     using detail::fmaf_;
     uint32_t ix = detail::f32_bits(1.0f - u) + 0x004afb0du;
     float nk = (float)(127 - (int32_t)(ix >> 23)); /* -k */
     float mant = detail::f32_from_bits((ix & 0x007fffffu) + 0x3f3504f3u);
-    float t = detail::div_rn_unit(fmaf_(mant, -2.0f, 2.0f), mant + 1.0f), z4 = t * t;
-    float p = fmaf_(z4, fmaf_(z4, fmaf_(z4, 0.14275366f / 64, 0.20000061f / 16), 0.33333334f / 4), 1.0f);
-    return fmaf_(nk, 2.857213530660374e-06f / 2, fmaf_(nk, 1.38629150390625f / 2, t * p));
+    float num = fmaf_(mant, -2.0f, 2.0f), d = mant + 1.0f, dl = mant - (d - 1.0f);
+    float rcp = detail::div_rn_unit(1.0f, d), uh = fmaf_(num, rcp, 0.0f);
+    float r = fmaf_(-uh, dl, fmaf_(-uh, d, num)), v = uh * uh;
+    float q = fmaf_(v, fmaf_(v, 0.0023109776f, 0.012496489f), 0.08333336f);
+    float a = nk * 0.693145751953125f, hi = a + uh, e = uh - (hi - a);
+    return hi + fmaf_(uh * v, q, fmaf_(r, rcp, fmaf_(nk, 1.428606765330187e-06f, e)));
 }
 
 TANDEM_FN bool operator==(const Key &a, const Key &b) {
