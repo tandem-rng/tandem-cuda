@@ -133,28 +133,35 @@ the fill that starts at `pos` aligned up to 64 bits, and `fill_exponential_f32` 
 on Float32 draws aligned up to 32 bits, as Appendix A of the specification defines them. A fill
 consumes `n` draws, equals the `Rng::exponential()` (`exponentialf()`) calls, and an empty fill
 returns `pos` unchanged. `tandem::exponential_f64` and `exponential_f32` in `core.hpp` compute the
-reference logarithm and the logarithm of the f32 Box-Muller step on hosts and devices: no libm
-call, every multiply-add
-an explicit `std::fma`, and no plain product feeding a plain sum. Device contraction therefore
-cannot change the bits, and every host and device returns tandem-c's values, which the tests check
-byte for byte. Building device code with `-use_fast_math` or `-prec-div=false` changes the f64
-division and breaks that. The maximum error is 1.1e-15 relative in f64 and 2.8e-7 in f32. The
+reference logarithm and tandem-c's f32 exponential logarithm on hosts and devices: no libm call,
+every multiply-add an explicit `std::fma`, and no plain product feeding a plain sum unless the
+product is exact. Device contraction therefore cannot change the bits, and every host and device
+returns tandem-c's values, which the tests check byte for byte. Building device code with
+`-use_fast_math` or `-prec-div=false` changes the f64 division and breaks that. The maximum error
+is 1.1e-15 relative in f64 and 0.571 ulp in f32. The
 fills run the direct kernel, because the map makes them compute bound and the tile kernel's
 separate write phase lost 7 to 13 % on the A100. The spec's `conformance/exponential.json` holds
 the fixtures for ports.
 
-The reference logarithm multiplies by -4 and halves the result. `neg_log_f64` and
-`exponential_f32` move those powers of two into the operands instead: the numerator `2 - 2m`
-gives `t = -2s`, the polynomial runs on `t^2` with each coefficient of `s^(2j)` divided by `4^j`,
-and the `ln 2` terms are halved. A power of two commutes with rounding while no value is
-subnormal, so each operation rounds to the reference's value times that power of two, and the
-result has the reference's bits with two multiplications fewer. On a device the f32 division is
-the fast path of the IEEE division without its range check and slow path, which only inputs
-outside `[1, 4)` or near the float range's ends need. `tests/test_cuda.cu` compares the f32 map
-with tandem-c's arithmetic for all 2^24 Float32 draws, on the device and on the host. On the A100
-the f32 fill went from 1023 to 1150 GiB/s and the f64 fill from 909 to 935 to 931 to 955. The
-f64 division keeps its check: the same steps with `rcp.approx.ftz.f64` as the seed differed from
+The reference logarithm multiplies by -4 and halves the result. `neg_log_f64` moves those powers
+of two into the operands instead: the numerator `2 - 2m` gives `t = -2s`, the polynomial runs on
+`t^2` with each coefficient of `s^(2j)` divided by `4^j`, and the `ln 2` terms are halved. A power
+of two commutes with rounding while no value is subnormal, so each operation rounds to the
+reference's value times that power of two, and the result has the reference's bits with two
+multiplications fewer. On the A100 the f64 fill went from 909 to 935 to 931 to 955 GiB/s. The f64
+division keeps its check: the same steps with `rcp.approx.ftz.f64` as the seed differed from
 `div.rn.f64` in 0.2 % of 2^34 test inputs.
+
+`exponential_f32` is tandem-c's `neg_log_f32` of `1 - u`. It carries `u = (2 - 2m) / (m + 1)` as
+`uh + r / d`, with `m + 1 = d + dl` exactly and `r` the residual of `uh`, and adds `nk ln2_hi` to
+`uh` by an exact fast two-sum. The result is within 0.571 ulp for every Float32 draw, so
+`1 - exp(-x)` maps each draw back to its own 2^-24 grid point. `uh` rounds in an fma, because a
+contracted `num * rcp` would feed the unrounded product to the two-sum. On a device `1 / d` is the
+fast path of the IEEE division without its range check and slow path, which only inputs outside
+`[1, 4)` or near the float range's ends need. `tests/test_cuda.cu` compares the f32 map with
+tandem-c's arithmetic for all 2^24 Float32 draws, on the device and on the host. The earlier
+single-float map ran the f32 fill at 1150 GiB/s on the A100, and this map adds 10 f32 operations
+per draw.
 
 Every fill reaches the A100's 250 W power cap when it runs for long. A bench that times the
 fastest of a few calls after a shared warm-up then measures the power the previous rows left.
