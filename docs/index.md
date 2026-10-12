@@ -7,7 +7,7 @@ A100 memory at about 1390 GiB/s.
 - [API](api.md): the fills, the host `generator`, `device_rng`, the Thrust adapters and parallel use.
 - [Design](design.md): the contract of the bounded, normal and exponential fills.
 - [Tests](tests.md): what the suite checks and what CI runs.
-- [Speed](speed.md): A100 figures against cuRAND.
+- [Performance](speed.md): A100 figures against cuRAND.
 
 ## Install
 
