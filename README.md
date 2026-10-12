@@ -10,13 +10,16 @@ Header-only CUDA implementation of [Tandem8x32](https://github.com/tandem-rng/sp
 noncryptographic pseudorandom number generator. It produces the stream the specification
 defines, bit for bit, and fills A100 memory at about 1390 GiB/s.
 
-Copy `tandem.cuh` and `include/tandem/`, or put them on the include path. `tandem.cuh` builds
-as C++23 with CUDA 13.4 and clang 20, and `include/tandem/core.hpp` stays valid C++17.
+## Install
+
+Copy `tandem.cuh` and `include/tandem/`, or put them on the include path.
 
 ```sh
 nvcc -I<tandem-cuda>/include ...
 make test TANDEM_C=../tandem-c      # or: pixi install && pixi run test
 ```
+
+## Quick start
 
 ```cpp
 #include "tandem.cuh"
@@ -32,9 +35,16 @@ __global__ void kernel(uint32_t k0, uint32_t k1, uint32_t k2, uint32_t k3, float
 }
 ```
 
+## Requirements
+
+`tandem.cuh` builds as C++23 with CUDA 13.4 and clang 20.
+`include/tandem/core.hpp` stays valid C++17.
+
+## Documentation
+
 See [API](docs/api.md) for every fill, `device_rng` and the Thrust adapters, and
 [design](docs/design.md), [tests](docs/tests.md) and [speed](docs/speed.md) for the rest.
 
 Portions of the code were generated with the assistance of LLMs.
 
-[Documentation](https://tandem-rng.github.io/tandem-cuda/) · [Apache 2.0 license](LICENSE)
+[Docs](https://tandem-rng.github.io/tandem-cuda/) · [Specification](https://github.com/tandem-rng/spec/blob/main/SPEC.md) · [Website](https://tandem-rng.github.io/) · [Issues](https://github.com/tandem-rng/tandem-cuda/issues) · [License](LICENSE)
