@@ -82,6 +82,9 @@ grid point. See [design](design.md) for the costs that were removed.
 
 cuRAND is faster on five rows. On the bool, the 2^64 - 2 bounded and the f32 exponential rows its
 nearest call does less work than the row: no expansion of bits to bytes, no bounding, no
-logarithm. The Thrust rows cannot match it: element i of a Tandem stream needs its chunk's seeding,
-eight rounds of the step, and up to K - 1 steps, while a Philox element is one ten-round block of
-its counter.
+logarithm. The Thrust rows are slower in these measurements: element i of a Tandem stream needs
+its chunk's seeding, eight rounds of the step, followed by 1 through K steps, while a Philox
+element is one ten-round block of its counter. Across complete groups in this contiguous
+benchmark, K = 32 averages 24.5 steps per requested element. Independent indexed calls repeat
+that work for each word or pair of words in a block. The fill kernels share it across outputs,
+so use a fill when materialising a contiguous array.
