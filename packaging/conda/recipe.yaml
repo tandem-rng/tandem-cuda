@@ -31,6 +31,7 @@ tests:
   - package_contents:
       include:
         - tandem.cuh
+        - tandem_thrust.cuh
         - tandem/core.hpp
   # Compiles the portable core with the host compiler. Compiling tandem.cuh needs nvcc and
   # a GPU runs the result, so CI covers that.

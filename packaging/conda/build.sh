@@ -3,4 +3,4 @@ set -euo pipefail
 
 mkdir -p "${PREFIX}/include"
 cp -R include/tandem "${PREFIX}/include/"
-cp tandem.cuh "${PREFIX}/include/"
+cp tandem.cuh tandem_thrust.cuh "${PREFIX}/include/"
